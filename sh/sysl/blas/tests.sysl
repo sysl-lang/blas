@@ -541,4 +541,253 @@ an_empty_matrix_has_empty_rows_and_columns()
 @test
 the_errors_render()
     assert_eq(s"${ShapeMismatch}", "the extents of the operands do not agree", "ShapeMismatch")
+    assert_eq(s"${ZeroIncrement}", "a vector's increment is zero", "ZeroIncrement")
+    assert_eq(s"${LeadingDimension}", "a leading dimension is less than the row count", "LeadingDimension")
+    assert_eq(s"${OutOfStorage}", "the view reaches past its storage", "OutOfStorage")
     assert_eq(s"${TooLarge}", "an extent does not fit a 32-bit int", "TooLarge")
+
+// -- every refusal, in the order a constructor checks -----------------------------------------------
+
+// `strided` and `from_ptr` check the increment, then the 32-bit range, then the storage — so a view
+// that is both too large and past its storage answers `TooLarge`, which says which bound to fix.
+@test
+a_view_refuses_in_a_fixed_order()
+    var xs = [1.0, 2.0, 3.0]
+    val p = as_mut_ptr(xs[..])
+
+    assert(fails_with(VectorView.strided(xs[..], 2147483648, 1), TooLarge), "2³¹ elements of 3")
+    assert(fails_with(VectorView.strided(xs[..], 2, -2147483648), TooLarge), "inc = −2³¹")
+    assert(fails_with(VectorView.strided(xs[..], 2147483648, 0), ZeroIncrement), "zero before size")
+    assert(fails_with(VectorView.from_ptr(p, 2, 0), ZeroIncrement), "from a pointer, increment zero")
+    assert(fails_with(MatrixView.from_ptr(p, 2147483648, 1, 1), TooLarge), "2³¹ rows, before ld < rows")
+    assert(fails_with(MatrixView.from_ptr(p, 2, 1, 1), LeadingDimension), "from a pointer, ld below rows")
+    assert(fails_with(MatrixView.from_ptr(p, 0, 1, 0), LeadingDimension), "from a pointer, ld zero")
+    assert(MatrixView.from_ptr(p, 0, 5, 1).is_ok(), "an empty matrix spans nothing, so any pointer will do")
+
+@test
+gemm_refuses_a_c_of_the_wrong_rows_or_columns()
+    var a = a23()
+    var cm = reals(9, _ -> 7.0)
+    val m = MatrixView.of(a.view(), 2, 3).unwrap()
+
+    // A·Aᵀ is 2 × 2.
+    assert(fails_with(gemm(NoTrans, Trans, 1.0, m, m, 0.0, MatrixView.of(cm.view(), 3, 2).unwrap()), ShapeMismatch), "three rows")
+    assert(fails_with(gemm(NoTrans, Trans, 1.0, m, m, 0.0, MatrixView.of(cm.view(), 2, 3).unwrap()), ShapeMismatch), "three columns")
+    assert(fails_with(gemm(Trans, NoTrans, 1.0, m, m, 0.0, MatrixView.of(cm.view(), 3, 2).unwrap()), ShapeMismatch), "Aᵀ·A has three columns")
+    assert(cm[0] == 7.0 && cm[8] == 7.0, "C untouched")
+
+// -- every element type through every routine --------------------------------------------------------
+
+@test
+dotc_of_real_vectors_is_dot()
+    var x = [1.0, 2.0, 3.0]
+    var y = [4.0, 5.0, 6.0]
+    var s: [3]f32 = [1.0, 2.0, 3.0]
+
+    assert_eq(dotc(dense(x[..]), dense(y[..])).unwrap(), 32.0, "ddot")
+    assert_eq(dotc(VectorView.of(s[..]).unwrap(), VectorView.of(s[..]).unwrap()).unwrap(), 14.0, "sdot")
+
+@test
+dotc_runs_a_negative_increment_backwards()
+    var x = [Complex(1.0, 2.0), Complex(3.0, -1.0)]
+    var y = [Complex(0.0, 1.0), Complex(2.0, 0.0)]
+
+    // y at −1 is (2, i): conj(1+2i)·2 + conj(3−i)·i = 2−4i + 3i−1
+    assert_eq(dotc(VectorView.of(x[..]).unwrap(), VectorView.strided(y[..], 2, -1).unwrap()).unwrap(), Complex(1.0, -1.0), "zdotc")
+
+@test
+level_one_at_f32()
+    var x: [3]f32 = [1.0, 2.0, 3.0]
+    var y: [3]f32 = [10.0, 20.0, 30.0]
+    var w: [3]f32 = [3.0, 99.0, -4.0]
+
+    axpy(2.0, VectorView.of(x[..]).unwrap(), VectorView.of(y[..]).unwrap()).unwrap()
+    assert(y[0] == 12.0 && y[1] == 24.0 && y[2] == 36.0, "saxpy writes y")
+    assert(x[0] == 1.0 && x[2] == 3.0, "saxpy leaves x")
+
+    val v = VectorView.strided(w[..], 2, 2).unwrap()
+
+    assert_eq(nrm2(v), 5.0, "snrm2")
+    assert_eq(asum(v), 7.0, "sasum")
+
+    scal(2.0, v)
+    assert(w[0] == 6.0 && w[1] == 99.0 && w[2] == -8.0, "sscal, the gap untouched")
+
+@test
+complex_axpy_and_scal_at_both_widths()
+    var x: [2]Complex[f32] = [Complex(1.0, 0.0), Complex(0.0, 1.0)]
+    var y: [2]Complex[f32] = [Complex(0.0, 0.0), Complex(5.0, 0.0)]
+
+    axpy(Complex(0.0, 1.0), VectorView.of(x[..]).unwrap(), VectorView.of(y[..]).unwrap()).unwrap()
+    assert(y[0] == Complex(0.0, 1.0) && y[1] == Complex(4.0, 0.0), "caxpy writes y")
+    assert(x[0] == Complex(1.0, 0.0), "caxpy leaves x")
+
+    // At increment 2 the middle element is a gap: i·(1+2i) = −2+i, i·3 = 3i.
+    var s: [3]Complex[f32] = [Complex(1.0, 2.0), Complex(9.0, 0.0), Complex(3.0, 0.0)]
+    var z = [Complex(1.0, 2.0), Complex(9.0, 0.0), Complex(3.0, 0.0)]
+
+    scal(Complex(0.0, 1.0), VectorView.strided(s[..], 2, 2).unwrap())
+    assert(s[0] == Complex(-2.0, 1.0) && s[1] == Complex(9.0, 0.0) && s[2] == Complex(0.0, 3.0), "cscal")
+    scal(Complex(0.0, 1.0), VectorView.strided(z[..], 2, 2).unwrap())
+    assert(z[0] == Complex(-2.0, 1.0) && z[1] == Complex(9.0, 0.0) && z[2] == Complex(0.0, 3.0), "zscal")
+
+@test
+gemv_at_f32_and_complex_f32()
+    var a: [6]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    var x: [3]f32 = [1.0, 1.0, 1.0]
+    var y: [2]f32 = [0.0, 0.0]
+
+    gemv(NoTrans, 1.0, MatrixView.of(a[..], 2, 3).unwrap(), VectorView.of(x[..]).unwrap(), 0.0, VectorView.of(y[..]).unwrap()).unwrap()
+    assert(y[0] == 9.0 && y[1] == 12.0, "sgemv")
+
+    // A = [[1, i], [2, 3]]: A·(1, 1) = (1+i, 5); read row-major it would be (3, 3+i).
+    var ca: [4]Complex[f32] = [Complex(1.0, 0.0), Complex(2.0, 0.0), Complex(0.0, 1.0), Complex(3.0, 0.0)]
+    var cx: [2]Complex[f32] = [Complex(1.0, 0.0), Complex(1.0, 0.0)]
+    var cy: [2]Complex[f32] = [Complex(0.0, 0.0), Complex(0.0, 0.0)]
+
+    gemv(NoTrans, Complex(1.0, 0.0), MatrixView.of(ca[..], 2, 2).unwrap(), VectorView.of(cx[..]).unwrap(), Complex.zero(), VectorView.of(cy[..]).unwrap()).unwrap()
+    assert(cy[0] == Complex(1.0, 1.0) && cy[1] == Complex(5.0, 0.0), "cgemv")
+
+@test
+gemm_at_complex_f32_with_different_flags()
+    // A = [[1, i], [2, 3]], B = [[1, 0], [1, 1]]. Aᵀ·B = [[3, 2], [3+i, 3]]; A·Bᵀ would be
+    // [[1, 1+i], [2, 5]].
+    var a: [4]Complex[f32] = [Complex(1.0, 0.0), Complex(2.0, 0.0), Complex(0.0, 1.0), Complex(3.0, 0.0)]
+    var b: [4]Complex[f32] = [Complex(1.0, 0.0), Complex(1.0, 0.0), Complex(0.0, 0.0), Complex(1.0, 0.0)]
+    var cm: [4]Complex[f32] = [Complex(0.0, 0.0), Complex(0.0, 0.0), Complex(0.0, 0.0), Complex(0.0, 0.0)]
+
+    gemm(Trans, NoTrans, Complex(1.0, 0.0), MatrixView.of(a[..], 2, 2).unwrap(), MatrixView.of(b[..], 2, 2).unwrap(), Complex.zero(), MatrixView.of(cm[..], 2, 2).unwrap()).unwrap()
+    assert_eq(cm[0], Complex(3.0, 0.0), "(0, 0)")
+    assert_eq(cm[1], Complex(3.0, 1.0), "(1, 0)")
+    assert_eq(cm[2], Complex(2.0, 0.0), "(0, 1)")
+    assert_eq(cm[3], Complex(3.0, 0.0), "(1, 1)")
+
+// -- leading dimensions, negative increments, empty extents -----------------------------------------
+
+@test
+gemv_reads_a_sub_block_at_its_leading_dimension_with_a_reversed_x()
+    var big = reals(20, k -> real(k))                       // 4 × 5, ld 4
+    var x = [1.0, 0.0, 2.0, 0.0, 3.0]
+    var y = [0.0, 0.0]
+    val a = MatrixView.of(big.view(), 4, 5).unwrap().block(1, 1, 2, 3).unwrap()    // [[5, 9, 13], [6, 10, 14]]
+
+    // x at −2 is (3, 2, 1).
+    gemv(NoTrans, 1.0, a, VectorView.strided(x[..], 3, -2).unwrap(), 0.0, dense(y[..])).unwrap()
+    assert(y[0] == 46.0 && y[1] == 52.0, s"got ${y[0]}, ${y[1]}")
+
+@test
+a_column_of_a_strided_matrix_starts_at_the_leading_dimension()
+    var xs = reals(20, k -> real(k))
+    var ones = [1.0, 1.0, 1.0]
+    val m = MatrixView.strided(xs.view(), 3, 4, 5).unwrap()
+
+    assert_eq(dot(m.col(2), dense(ones[..])).unwrap(), 10.0 + 11.0 + 12.0, "column 2 is xs[10..<13]")
+
+@test
+products_over_an_empty_inner_dimension_scale_by_beta()
+    var none: [0]real = []
+    var y = [1.0, 2.0]
+    var cm = [1.0, 2.0, 3.0, 4.0]
+
+    // A is 2 × 0: A·x is the zero vector, so y ← β·y.
+    gemv(NoTrans, 1.0, MatrixView.of(none[..], 2, 0).unwrap(), dense(none[..]), 2.0, dense(y[..])).unwrap()
+    assert(y[0] == 2.0 && y[1] == 4.0, s"gemv: got ${y[0]}, ${y[1]}")
+
+    // Aᵀ with A 0 × 3 is 3 × 0; y at −2 skips its gaps; β = 0 zeroes rather than multiplies.
+    var w = [5.0, -1.0, 6.0, -1.0, 7.0]
+
+    gemv(Trans, 1.0, MatrixView.of(none[..], 0, 3).unwrap(), dense(none[..]), 0.0, VectorView.strided(w[..], 3, -2).unwrap()).unwrap()
+    assert(w[0] == 0.0 && w[2] == 0.0 && w[4] == 0.0, "β = 0 zeroes y")
+    assert(w[1] == -1.0 && w[3] == -1.0, "the gaps are not touched")
+
+    var c = [Complex(1.0, 1.0), Complex(2.0, 0.0)]
+    var cnone: [0]Complex[real] = []
+
+    gemv(NoTrans, Complex(1.0, 0.0), MatrixView.of(cnone[..], 2, 0).unwrap(), VectorView.of(cnone[..]).unwrap(), Complex(0.0, 1.0), VectorView.of(c[..]).unwrap()).unwrap()
+    assert(c[0] == Complex(-1.0, 1.0) && c[1] == Complex(0.0, 2.0), "complex: y ← i·y")
+
+    // k = 0: C ← β·C.
+    gemm(NoTrans, NoTrans, 1.0, MatrixView.of(none[..], 2, 0).unwrap(), MatrixView.of(none[..], 0, 2).unwrap(), 3.0, MatrixView.of(cm[..], 2, 2).unwrap()).unwrap()
+    assert(cm[0] == 3.0 && cm[1] == 6.0 && cm[2] == 9.0 && cm[3] == 12.0, "gemm: C ← 3C")
+
+    // m = 0 and n = 0: nothing to write, and nothing refused.
+    gemm(NoTrans, NoTrans, 1.0, MatrixView.of(none[..], 0, 2).unwrap(), MatrixView.of(cm[..], 2, 0).unwrap(), 0.0, MatrixView.of(none[..], 0, 0).unwrap()).unwrap()
+    axpy(1.0, dense(none[..]), dense(none[..])).unwrap()
+    scal(2.0, dense(none[..]))
+    assert_eq(asum(dense(none[..])), 0.0, "an empty sum")
+
+// -- a view made field by field ----------------------------------------------------------------------
+
+// The fields are public, so a view can be written out without a constructor. One that fits its
+// storage works like any other; one that does not stops at the routine's `require`, before BLAS reads
+// past it. A contract's trap prints nothing, so these ask only that the run stopped — and each would
+// otherwise run to its `print`, since nothing else here checks an index.
+
+@test
+a_view_written_out_that_fits_works()
+    var xs = [1.0, 2.0, 3.0, 4.0]
+    val v = VectorView(xs[..], 2, 2)
+    val m = MatrixView(xs[..], 2, 2, 2)
+
+    assert_eq(dot(v, v).unwrap(), 1.0 + 9.0, "xs[0], xs[2]")
+    assert_eq(dot(m.row(1), m.col(1)).unwrap(), 2.0 * 3.0 + 4.0 * 4.0, "row 1 · column 1")
+
+@test(should_trap)
+a_vector_written_out_past_its_storage_stops()
+    var xs = [1.0, 2.0]
+    val v = VectorView(xs[..], 5, 1)
+
+    print(dot(v, v).is_ok())
+
+// `dot` at increment zero, because BLAS takes it there (it reads one element `n` times), so only the
+// view check can stop it. `scal` and `gemm` below are handed extents past the storage and parameters
+// the library accepts, for the same reason: Accelerate aborts on a parameter it rejects, which would
+// stop the run whether or not the check is there.
+@test(should_trap)
+a_vector_written_out_with_increment_zero_stops()
+    var xs = [1.0, 2.0]
+    val v = VectorView(xs[..], 2, 0)
+
+    print(dot(v, v).is_ok())
+
+@test(should_trap)
+scal_of_a_vector_written_out_past_its_storage_stops()
+    var xs = [1.0, 2.0, 3.0]
+
+    scal(2.0, VectorView(xs[..<2], 3, 1))
+    print(xs[2])
+
+@test(should_trap)
+gemm_of_a_matrix_written_out_past_its_storage_stops()
+    var xs = [1.0, 2.0, 3.0, 4.0]
+    var cm = [0.0, 0.0, 0.0, 0.0]
+    val short = MatrixView(xs[..<2], 2, 2, 2)
+    val good = MatrixView.of(xs[..], 2, 2).unwrap()
+
+    print(gemm(NoTrans, NoTrans, 1.0, good, short, 0.0, MatrixView.of(cm[..], 2, 2).unwrap()).is_ok())
+
+@test(should_trap)
+a_vector_whose_length_was_assigned_stops()
+    var xs = [1.0, 2.0]
+    var v = VectorView.of(xs[..]).unwrap()
+
+    v.len = 3
+    print(nrm2(v))
+
+@test(should_trap)
+a_matrix_written_out_with_ld_below_rows_stops()
+    var xs = [1.0, 2.0, 3.0, 4.0]
+    var cm = [0.0, 0.0, 0.0, 0.0]
+    val bad = MatrixView(xs[..], 2, 2, 1)
+
+    print(gemm(NoTrans, NoTrans, 1.0, bad, bad, 0.0, MatrixView.of(cm[..], 2, 2).unwrap()).is_ok())
+
+@test(should_trap)
+a_matrix_whose_columns_were_assigned_stops()
+    var a = a23()
+    var x = [1.0, 1.0, 1.0, 1.0]
+    var y = [0.0, 0.0]
+    var m = MatrixView.of(a.view(), 2, 3).unwrap()
+
+    m.cols = 4
+    print(gemv(NoTrans, 1.0, m, dense(x[..]), 0.0, dense(y[..])).is_ok())

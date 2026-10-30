@@ -5,6 +5,11 @@ module sh.sysl.blas
  * view's own range was checked when it was made (`VectorView.of`, `MatrixView.strided`, …), so a
  * call here never gives BLAS a stride or a leading dimension it would reject.
  *
+ * **A view written out field by field is checked again**, since the fields are public: one whose
+ * increment is zero, whose leading dimension is below its row count, or whose extent reaches past its
+ * `data` stops the program at the call (a `require`), rather than reaching past the storage inside
+ * the library. A view a constructor made always passes.
+ *
  * An output must not share elements with an input, which is BLAS's rule; it is not checked, since
  * two blocks of one matrix interleave in memory without sharing an element.
  */
@@ -12,19 +17,28 @@ module sh.sysl.blas
 private dims[T](op: Op, a: MatrixView[T]) -> (usize, usize) = if op == NoTrans then (a.rows, a.cols) else (a.cols, a.rows)
 
 /** `Σ xᵢ·yᵢ`, the product nex's `x @ y` is — unconjugated for a complex element (`?dotu_sub`). */
+@track_caller
 dot[T: Element](x: VectorView[T], y: VectorView[T]) -> Result[T, BlasError]
+    require sound_vector(x) && sound_vector(y), "a vector view that no constructor made reaches past its storage"
+
     if x.len != y.len then return Err(ShapeMismatch)
 
     Ok(T.dotu(i32(x.len), x.ptr(), i32(x.inc), y.ptr(), i32(y.inc)))
 
 /** `Σ conj(xᵢ)·yᵢ` (`?dotc_sub`); for a real element the same as `dot`. */
+@track_caller
 dotc[T: Element](x: VectorView[T], y: VectorView[T]) -> Result[T, BlasError]
+    require sound_vector(x) && sound_vector(y), "a vector view that no constructor made reaches past its storage"
+
     if x.len != y.len then return Err(ShapeMismatch)
 
     Ok(T.dotc(i32(x.len), x.ptr(), i32(x.inc), y.ptr(), i32(y.inc)))
 
 /** `y ← α·x + y`. */
+@track_caller
 axpy[T: Element](alpha: T, x: VectorView[T], y: VectorView[T]) -> Result[unit, BlasError]
+    require sound_vector(x) && sound_vector(y), "a vector view that no constructor made reaches past its storage"
+
     if x.len != y.len then return Err(ShapeMismatch)
 
     T.axpy(i32(x.len), alpha, x.ptr(), i32(x.inc), y.ptr(), i32(y.inc))
@@ -37,29 +51,56 @@ axpy[T: Element](alpha: T, x: VectorView[T], y: VectorView[T]) -> Result[unit, B
  * does not change any of the three, so these pass `|inc|`, and a reversed view is scaled, measured and
  * summed exactly as the forward one over the same storage.
  */
-scal[T: Element](alpha: T, x: VectorView[T]) = T.scal(i32(x.len), alpha, x.ptr(), unit_inc(x.inc))
+@track_caller
+scal[T: Element](alpha: T, x: VectorView[T])
+    require sound_vector(x), "a vector view that no constructor made reaches past its storage"
+
+    T.scal(i32(x.len), alpha, x.ptr(), unit_inc(x.inc))
 
 /** `‖x‖₂`, computed without overflow by the library's scaling — at the element's real width. */
-nrm2[T: Element](x: VectorView[T]) -> T::Real = T.nrm2(i32(x.len), x.ptr(), unit_inc(x.inc))
+@track_caller
+nrm2[T: Element](x: VectorView[T]) -> T::Real
+    require sound_vector(x), "a vector view that no constructor made reaches past its storage"
+
+    T.nrm2(i32(x.len), x.ptr(), unit_inc(x.inc))
 
 /** `Σ |xᵢ|` for a real element, `Σ |re xᵢ| + |im xᵢ|` for a complex one (BLAS's `asum`, not the
  * modulus) — at the element's real width.
  */
-asum[T: Element](x: VectorView[T]) -> T::Real = T.asum(i32(x.len), x.ptr(), unit_inc(x.inc))
+@track_caller
+asum[T: Element](x: VectorView[T]) -> T::Real
+    require sound_vector(x), "a vector view that no constructor made reaches past its storage"
+
+    T.asum(i32(x.len), x.ptr(), unit_inc(x.inc))
 
 private unit_inc(inc: int) -> i32 = i32(if inc < 0 then -inc else inc)
 
 /** `y ← α·op(A)·x + β·y`. `op(A)` is `m` × `n`: `x` must have `n` elements and `y` `m`. */
+@track_caller
 gemv[T: Element](op: Op, alpha: T, a: MatrixView[T], x: VectorView[T], beta: T, y: VectorView[T]) -> Result[unit, BlasError]
+    require sound_matrix(a), "a matrix view that no constructor made reaches past its storage"
+    require sound_vector(x) && sound_vector(y), "a vector view that no constructor made reaches past its storage"
+
     val (m, n) = dims(op, a)
 
     if x.len != n || y.len != m then return Err(ShapeMismatch)
+
+    // With no columns in `op(A)` the product is `β·y`, but BLAS's `?gemv` returns at once when either
+    // extent is zero and leaves `y` as it was. `?gemm` with `k = 0` does scale by `β` (and zeroes for
+    // `β = 0`, NaN included), so `y` goes through it as a 1 × m matrix whose columns are `|inc|`
+    // apart; A and B are never read.
+    if n == 0
+        T.gemm(flag(NoTrans), flag(NoTrans), 1, i32(m), 0, alpha, y.ptr(), 1, y.ptr(), 1, beta, y.ptr(), unit_inc(y.inc))
+        return Ok(())
 
     T.gemv(flag(op), i32(a.rows), i32(a.cols), alpha, a.ptr(), i32(a.ld), x.ptr(), i32(x.inc), beta, y.ptr(), i32(y.inc))
     Ok(())
 
 /** `C ← α·op(A)·op(B) + β·C`. `op(A)` is `m` × `k`, `op(B)` is `k` × `n`, and `C` is `m` × `n`. */
+@track_caller
 gemm[T: Element](op_a: Op, op_b: Op, alpha: T, a: MatrixView[T], b: MatrixView[T], beta: T, cm: MatrixView[T]) -> Result[unit, BlasError]
+    require sound_matrix(a) && sound_matrix(b) && sound_matrix(cm), "a matrix view that no constructor made reaches past its storage"
+
     val (m, k) = dims(op_a, a)
     val (kb, n) = dims(op_b, b)
 

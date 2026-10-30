@@ -216,3 +216,13 @@ private check_shape(rows: usize, cols: usize, ld: usize) -> Result[unit, BlasErr
     if ld < rows || ld == 0 then return Err(LeadingDimension)
 
     Ok(())
+
+// What every routine asks of a view before BLAS sees it. A view made by `of`, `strided`, `from_ptr`,
+// `block`, `row` or `col` always holds it; the fields are public, though, so a view written out field
+// by field, or whose fields were assigned after it was made, is checked again here — otherwise its
+// extent or increment would reach past `data` inside the library, where no index is checked.
+private[blas] sound_vector[T](v: VectorView[T]) -> bool =
+    v.inc != 0 && fits(v.len) && fits(magnitude(v.inc)) && vector_extent(v.len, v.inc) <= v.data.len
+
+private[blas] sound_matrix[T](a: MatrixView[T]) -> bool =
+    fits(a.rows) && fits(a.cols) && fits(a.ld) && a.ld >= a.rows && a.ld != 0 && matrix_extent(a.rows, a.cols, a.ld) <= a.data.len

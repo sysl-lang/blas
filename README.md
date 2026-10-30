@@ -37,6 +37,9 @@ dependencies {
 
 The coordinate names the package, `blas`; the module a program imports is `sh.sysl.blas`.
 
+The pure-sysl BLAS, with no C library to link, is [`sblas`](https://github.com/sysl-lang/sblas)
+(`sh.sysl.sblas`); this package binds the platform's.
+
 ## Which BLAS
 
 **Apple's Accelerate on macOS, OpenBLAS everywhere else** — the choice nex's compiler makes when it
@@ -78,8 +81,18 @@ nothing. **`sh.sysl.blas`** is what a program imports:
 
 **Every check happens before C sees the data.** A view is checked when it is made — its farthest
 element inside the slice, `ld ≥ max(1, rows)`, a non-zero increment, every extent within CBLAS's
-32-bit `int` — and a routine checks only that its operands' extents agree. So no call can reach the
-library's own parameter error (Accelerate prints it and aborts).
+32-bit `int` — and a routine checks that its operands' extents agree. So no call can reach the
+library's own parameter error (Accelerate prints it and aborts). The fields are public, so a view can
+also be written out field by field, or have a field assigned after it was made; a routine checks
+every view it is handed against its `data` again, and one that would reach past it stops the program
+at the call (a `require`) instead of letting the library read past the storage.
+
+**`gemv` over an `op(A)` with no columns is `y ← β·y`**, as its definition says — BLAS's own `?gemv`
+returns early there and leaves `y` as it was, so this case goes through `?gemm` with `k = 0`, which
+scales by `β` and zeroes for `β = 0`.
+
+**Every routine of `sh.sysl.blas.c` is `@needs(os)`**: both libraries allocate and start threads
+behind a call, so a module that declared `@no_os` is refused at its call.
 
 **A view's `data` is exactly the elements it spans**, a slice of what it was made from. Made from a
 slice — an array, a `Buf`'s `view()` — it keeps that slice's backing alive for as long as it is held,
@@ -103,15 +116,20 @@ would refuse them.
 
 ## Tested
 
-`sysl test .` — 62 tests, against Accelerate and, with `--features openblas`, against OpenBLAS 0.3.34.
+`sysl test .` — 84 tests, against Accelerate and, with `--features openblas`, against OpenBLAS 0.3.34.
 The oracle is never BLAS read back against itself: hand-computed small cases on integer-valued
 operands (exact, so compared with `==`), identities computed by separate calls (`A·I = A`,
 `(AB)ᵀ = BᵀAᵀ` over every pair of transpose flags, `trsm` undoing `trmm` over all sixteen
 side/triangle/transpose/diagonal combinations, `trsv` undoing `trmv`), and numpy's answers for a
 9 × 7 by 7 × 8 product and a complex `Aᴴ·B`, on operands chosen so every partial sum is exact. Strided
 vectors at increment 2 and at negative increments, sub-block views with a leading dimension larger
-than the row count, every `Op`, and every refusal. Every one of the 146 routines is called once, which
-proves each symbol resolves in the library linked.
+than the row count, empty extents (an empty inner dimension scales by `β`), every `Op`, every element
+type through every routine, each CBLAS enumeration value against an answer only it gives, every
+refusal and the order a constructor checks in, and views written out field by field. Every one of the
+146 routines is called once, which proves each symbol resolves in the library linked. A mutation
+pass — each parameter of the view layer, the dispatch and the enumeration values broken in turn, 116
+mutants — turns a test red for every one but passing `nrm2` a signed increment, which both libraries
+answer exactly as they answer `|inc|`.
 
 Run under AddressSanitizer (`SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`): the sysl half
 is instrumented (`instrumented: address (1 binary)`), the library is not.

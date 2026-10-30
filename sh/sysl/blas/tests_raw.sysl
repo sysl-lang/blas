@@ -371,3 +371,35 @@ sgemm_and_cgemm_through_the_raw_layer()
 
     c.cgemm(c.COL_MAJOR, c.CONJ_TRANS, c.NO_TRANS, 1, 1, 1, &one, as_mut_ptr(ca[..]), 1, as_mut_ptr(ca[..]), 1, &zero, as_mut_ptr(cc[..]), 1)
     assert(cc[0] == Complex(1.0, 0.0), "conj(i)·i")
+
+// Each enumeration constant against an answer that only it gives — the round trips above hold
+// whichever side or order they are handed, so these pin the values themselves.
+
+@test
+right_side_multiplies_from_the_right()
+    var a = [1.0, 99.0, 2.0, 3.0]          // [[1, 2], [0, 3]], upper
+    var b = [1.0, 1.0]                      // 1 × 2
+
+    // B·A = (1, 2 + 3); from the left a 1 × 1 A would leave (1, 1).
+    c.dtrmm(c.COL_MAJOR, c.RIGHT, c.UPPER, c.NO_TRANS, c.NON_UNIT, 1, 2, 1.0, as_mut_ptr(a[..]), 2, as_mut_ptr(b[..]), 1)
+    assert(b[0] == 1.0 && b[1] == 5.0, s"got ${b[0]}, ${b[1]}")
+
+@test
+trans_of_a_complex_matrix_does_not_conjugate()
+    var a = [z(0.0, 1.0), z(1.0, 0.0)]      // 2 × 1
+    var x = [z(1.0, 0.0), z(1.0, 0.0)]
+    var y = [z(0.0, 0.0)]
+    var one = z(1.0, 0.0)
+    var zero = z(0.0, 0.0)
+
+    c.zgemv(c.COL_MAJOR, c.TRANS, 2, 1, &one, as_mut_ptr(a[..]), 2, as_mut_ptr(x[..]), 1, &zero, as_mut_ptr(y[..]), 1)
+    assert_eq(y[0], z(1.0, 1.0), "Aᵀ·x = i + 1, not −i + 1")
+
+@test
+row_major_reads_rows()
+    var a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0, 0.0, 0.0]     // [[1, 2, 3], [4, 5, 6]], lda 3
+    var x = [1.0, 1.0, 1.0]
+    var y = [0.0, 0.0]
+
+    c.dgemv(c.ROW_MAJOR, c.NO_TRANS, 2, 3, 1.0, as_mut_ptr(a[..]), 3, as_mut_ptr(x[..]), 1, 0.0, as_mut_ptr(y[..]), 1)
+    assert(y[0] == 6.0 && y[1] == 15.0, s"got ${y[0]}, ${y[1]}")
