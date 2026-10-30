@@ -1,0 +1,46 @@
+// BLAS — the CBLAS interface to the Basic Linear Algebra Subprograms — bound for sysl.
+//
+// This is the block a consumer writes to reach it:
+//
+//     dependencies {
+//       blas { git = "github.com/sysl-lang/blas", version = "0.1.0" }
+//     }
+//
+// The coordinate names the package, `blas`; the module a program imports is `sh.sysl.blas`.
+
+package {
+  name    = "blas"
+  version = "0.1.0"
+
+  // The compiler this was written and tested against.
+  sysl = "0.8.2"
+}
+
+// **Which BLAS answers the calls is the platform's, exactly as nex's compiler chooses it**: Apple's
+// Accelerate on macOS, OpenBLAS everywhere else. On macOS the `openblas` feature swaps Accelerate
+// for Homebrew's OpenBLAS (keg-only, so it is found through its `openblas.pc`); off macOS the feature
+// changes nothing but where `-lopenblas` is looked for.
+//
+// Nothing here compiles C: the externs in `c/c.sysl` name the symbols, which are the same LP64 CBLAS
+// symbols in both libraries, so no header is read and no `.pc` compile flag reaches a compiler.
+features {
+  platform {
+    doc = "the platform's BLAS: Accelerate on macOS, OpenBLAS (-lopenblas) elsewhere"
+  }
+
+  openblas {
+    doc = "OpenBLAS, found through openblas.pc — on macOS in place of Accelerate"
+
+    requires.pkg_config.openblas = "OpenBLAS 0.3 — `brew install openblas` on macOS (keg-only: PKG_CONFIG_PATH=/opt/homebrew/opt/openblas/lib/pkgconfig), `apt install libopenblas-dev` on Debian"
+  }
+}
+
+choices {
+  library { doc = "which BLAS answers the calls", of = [platform, openblas], default = platform }
+}
+
+// `sysl test .` checks the default library — Accelerate on macOS. `sysl test . --features openblas`
+// runs the same suite against OpenBLAS.
+test {
+  features = [platform]
+}

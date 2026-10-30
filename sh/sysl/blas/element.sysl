@@ -1,0 +1,152 @@
+module sh.sysl.blas
+
+import sh.sysl.blas.c
+import sysl.math.Float
+import sysl.math.complex.Complex
+
+/** An element type BLAS has routines for: `f32`, `real`, `Complex[f32]` and `Complex[real]` — the
+ * `s`, `d`, `c` and `z` of the routine names.
+ *
+ * **This is the dispatch, not the interface.** Each member is one CBLAS routine at this element's
+ * prefix, called as the raw layer calls it — a pointer, a count, an increment — so a generic function
+ * of this module checks its views once and then reaches the right routine through `T`. A program
+ * calls `dot`, `gemm` and the rest; it names `Element` only in a bound.
+ */
+trait Element
+    /** The real type at the same width: what a norm or an absolute sum answers. */
+    type Real
+
+    /** `Σ xᵢ·yᵢ`, unconjugated — `?dot`, or `?dotu_sub` for a complex element. */
+    dotu(n: i32, x: *Self, incx: i32, y: *Self, incy: i32) -> Self
+
+    /** `Σ conj(xᵢ)·yᵢ` — `?dotc_sub`; for a real element the same as `dotu`. */
+    dotc(n: i32, x: *Self, incx: i32, y: *Self, incy: i32) -> Self
+
+    /** `y ← αx + y` — `?axpy`. */
+    axpy(n: i32, alpha: Self, x: *Self, incx: i32, y: *Self, incy: i32)
+
+    /** `x ← αx` — `?scal`. */
+    scal(n: i32, alpha: Self, x: *Self, incx: i32)
+
+    /** `‖x‖₂` — `?nrm2`, `scnrm2`, `dznrm2`. */
+    nrm2(n: i32, x: *Self, incx: i32) -> Self::Real
+
+    /** `Σ |re xᵢ| + |im xᵢ|` — `?asum`, `scasum`, `dzasum`. */
+    asum(n: i32, x: *Self, incx: i32) -> Self::Real
+
+    /** `y ← α·op(A)·x + β·y`, column-major — `?gemv`. */
+    gemv(trans: i32, m: i32, n: i32, alpha: Self, a: *Self, lda: i32, x: *Self, incx: i32, beta: Self, y: *Self, incy: i32)
+
+    /** `C ← α·op(A)·op(B) + β·C`, column-major — `?gemm`. */
+    gemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: Self, a: *Self, lda: i32, b: *Self, ldb: i32, beta: Self, cm: *Self, ldc: i32)
+
+impl Element for f32
+    type Real = f32
+
+    dotu(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) -> f32 = c.sdot(n, x, incx, y, incy)
+    dotc(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) -> f32 = c.sdot(n, x, incx, y, incy)
+    axpy(n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32) = c.saxpy(n, alpha, x, incx, y, incy)
+    scal(n: i32, alpha: f32, x: *f32, incx: i32) = c.sscal(n, alpha, x, incx)
+    nrm2(n: i32, x: *f32, incx: i32) -> f32 = c.snrm2(n, x, incx)
+    asum(n: i32, x: *f32, incx: i32) -> f32 = c.sasum(n, x, incx)
+
+    gemv(trans: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32) =
+        c.sgemv(c.COL_MAJOR, trans, m, n, alpha, a, lda, x, incx, beta, y, incy)
+
+    gemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32, beta: f32, cm: *f32, ldc: i32) =
+        c.sgemm(c.COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, cm, ldc)
+
+impl Element for real
+    type Real = real
+
+    dotu(n: i32, x: *real, incx: i32, y: *real, incy: i32) -> real = c.ddot(n, x, incx, y, incy)
+    dotc(n: i32, x: *real, incx: i32, y: *real, incy: i32) -> real = c.ddot(n, x, incx, y, incy)
+    axpy(n: i32, alpha: real, x: *real, incx: i32, y: *real, incy: i32) = c.daxpy(n, alpha, x, incx, y, incy)
+    scal(n: i32, alpha: real, x: *real, incx: i32) = c.dscal(n, alpha, x, incx)
+    nrm2(n: i32, x: *real, incx: i32) -> real = c.dnrm2(n, x, incx)
+    asum(n: i32, x: *real, incx: i32) -> real = c.dasum(n, x, incx)
+
+    gemv(trans: i32, m: i32, n: i32, alpha: real, a: *real, lda: i32, x: *real, incx: i32, beta: real, y: *real, incy: i32) =
+        c.dgemv(c.COL_MAJOR, trans, m, n, alpha, a, lda, x, incx, beta, y, incy)
+
+    gemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: real, a: *real, lda: i32, b: *real, ldb: i32, beta: real, cm: *real, ldc: i32) =
+        c.dgemm(c.COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, cm, ldc)
+
+/** A real width that has a complex BLAS: `f32` (`c`) and `real` (`z`).
+ *
+ * **A complex element dispatches through its width**, because an `impl` for a generic type covers
+ * every instantiation at once: `Complex[F]` is one `Element` for every `F` that is a `ComplexWidth`,
+ * and each width says which of the `c` and `z` routines it is. A complex scalar crosses by address,
+ * as CBLAS takes it, and a complex dot product comes back through the `_sub` form's out-parameter.
+ */
+trait ComplexWidth: Float
+    cdotu(n: i32, x: *Complex[Self], incx: i32, y: *Complex[Self], incy: i32, out: *Complex[Self])
+    cdotc(n: i32, x: *Complex[Self], incx: i32, y: *Complex[Self], incy: i32, out: *Complex[Self])
+    caxpy(n: i32, alpha: *Complex[Self], x: *Complex[Self], incx: i32, y: *Complex[Self], incy: i32)
+    cscal(n: i32, alpha: *Complex[Self], x: *Complex[Self], incx: i32)
+    cnrm2(n: i32, x: *Complex[Self], incx: i32) -> Self
+    casum(n: i32, x: *Complex[Self], incx: i32) -> Self
+    cgemv(trans: i32, m: i32, n: i32, alpha: *Complex[Self], a: *Complex[Self], lda: i32, x: *Complex[Self], incx: i32, beta: *Complex[Self], y: *Complex[Self], incy: i32)
+    cgemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: *Complex[Self], a: *Complex[Self], lda: i32, b: *Complex[Self], ldb: i32, beta: *Complex[Self], cm: *Complex[Self], ldc: i32)
+
+impl ComplexWidth for f32
+    cdotu(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, out: *Complex[f32]) = c.cdotu_sub(n, x, incx, y, incy, out)
+    cdotc(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, out: *Complex[f32]) = c.cdotc_sub(n, x, incx, y, incy, out)
+    caxpy(n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32) = c.caxpy(n, alpha, x, incx, y, incy)
+    cscal(n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32) = c.cscal(n, alpha, x, incx)
+    cnrm2(n: i32, x: *Complex[f32], incx: i32) -> f32 = c.scnrm2(n, x, incx)
+    casum(n: i32, x: *Complex[f32], incx: i32) -> f32 = c.scasum(n, x, incx)
+
+    cgemv(trans: i32, m: i32, n: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32, beta: *Complex[f32], y: *Complex[f32], incy: i32) =
+        c.cgemv(c.COL_MAJOR, trans, m, n, alpha, a, lda, x, incx, beta, y, incy)
+
+    cgemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32, beta: *Complex[f32], cm: *Complex[f32], ldc: i32) =
+        c.cgemm(c.COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, cm, ldc)
+
+impl ComplexWidth for real
+    cdotu(n: i32, x: *Complex[real], incx: i32, y: *Complex[real], incy: i32, out: *Complex[real]) = c.zdotu_sub(n, x, incx, y, incy, out)
+    cdotc(n: i32, x: *Complex[real], incx: i32, y: *Complex[real], incy: i32, out: *Complex[real]) = c.zdotc_sub(n, x, incx, y, incy, out)
+    caxpy(n: i32, alpha: *Complex[real], x: *Complex[real], incx: i32, y: *Complex[real], incy: i32) = c.zaxpy(n, alpha, x, incx, y, incy)
+    cscal(n: i32, alpha: *Complex[real], x: *Complex[real], incx: i32) = c.zscal(n, alpha, x, incx)
+    cnrm2(n: i32, x: *Complex[real], incx: i32) -> real = c.dznrm2(n, x, incx)
+    casum(n: i32, x: *Complex[real], incx: i32) -> real = c.dzasum(n, x, incx)
+
+    cgemv(trans: i32, m: i32, n: i32, alpha: *Complex[real], a: *Complex[real], lda: i32, x: *Complex[real], incx: i32, beta: *Complex[real], y: *Complex[real], incy: i32) =
+        c.zgemv(c.COL_MAJOR, trans, m, n, alpha, a, lda, x, incx, beta, y, incy)
+
+    cgemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: *Complex[real], a: *Complex[real], lda: i32, b: *Complex[real], ldb: i32, beta: *Complex[real], cm: *Complex[real], ldc: i32) =
+        c.zgemm(c.COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, cm, ldc)
+
+impl[F: ComplexWidth] Element for Complex[F]
+    type Real = F
+
+    dotu(n: i32, x: *Complex[F], incx: i32, y: *Complex[F], incy: i32) -> Complex[F]
+        var out: Complex[F] = Complex.zero()
+        F.cdotu(n, x, incx, y, incy, &out)
+        out
+
+    dotc(n: i32, x: *Complex[F], incx: i32, y: *Complex[F], incy: i32) -> Complex[F]
+        var out: Complex[F] = Complex.zero()
+        F.cdotc(n, x, incx, y, incy, &out)
+        out
+
+    axpy(n: i32, alpha: Complex[F], x: *Complex[F], incx: i32, y: *Complex[F], incy: i32)
+        var s = alpha
+        F.caxpy(n, &s, x, incx, y, incy)
+
+    scal(n: i32, alpha: Complex[F], x: *Complex[F], incx: i32)
+        var s = alpha
+        F.cscal(n, &s, x, incx)
+
+    nrm2(n: i32, x: *Complex[F], incx: i32) -> F = F.cnrm2(n, x, incx)
+    asum(n: i32, x: *Complex[F], incx: i32) -> F = F.casum(n, x, incx)
+
+    gemv(trans: i32, m: i32, n: i32, alpha: Complex[F], a: *Complex[F], lda: i32, x: *Complex[F], incx: i32, beta: Complex[F], y: *Complex[F], incy: i32)
+        var s = alpha
+        var t = beta
+        F.cgemv(trans, m, n, &s, a, lda, x, incx, &t, y, incy)
+
+    gemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: Complex[F], a: *Complex[F], lda: i32, b: *Complex[F], ldb: i32, beta: Complex[F], cm: *Complex[F], ldc: i32)
+        var s = alpha
+        var t = beta
+        F.cgemm(ta, tb, m, n, k, &s, a, lda, b, ldb, &t, cm, ldc)

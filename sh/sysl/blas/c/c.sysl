@@ -1,0 +1,206 @@
+// CBLAS as C reaches it: one declaration per routine, all 146 of the reference CBLAS that both
+// Accelerate and OpenBLAS export.
+//
+// **Nothing here checks anything.** A dimension, a stride and a leading dimension go to the library
+// as given; a wrong one is the library's parameter error (Accelerate prints it and aborts) or a read
+// past the storage. `sh.sysl.blas`, the module above this one, checks every shape before it calls.
+//
+// **Written by `sysl import-c` from Accelerate's `cblas.h` and then edited:**
+//
+// - **No `@include`, no `c const`.** The two libraries ship different headers in different places,
+//   and OpenBLAS's `openblas.pc` carries `-fopenmp` compile flags; the symbols, though, are the same
+//   LP64 CBLAS symbols in both (`int` dimensions and strides), so this file names the symbols and
+//   compiles no C. These are the symbols nex's compiler calls for `@`, so an interpreted product and
+//   a compiled one run the same code.
+// - **The CBLAS enumerations are `i32` constants** with the values the CBLAS standard fixes and both
+//   headers spell (`CblasColMajor` is 102, and so on).
+// - **A complex element is `Complex[f32]` or `Complex[f64]`** where the header says `void *`: two
+//   fields of the width, which is C's `float _Complex` layout.
+// - **`i?amax` answers `i32`.** Accelerate's `CBLAS_INDEX` is `int`, OpenBLAS's is `size_t`; both
+//   return the index in the first integer return register, and its low 32 bits are the answer in
+//   either, since `n` is itself an `int`.
+// - **Left out:** `cblas_xerbla` and `cblas_errprn` (the error reporters, called by the library, not
+//   by a program), and each library's own extensions (Accelerate's `catlas_*`, `appleblas_*`,
+//   `*_spi`, `*_singlecore`; OpenBLAS's `axpby`, `omatcopy`, `gemmt`, `?amin` and the rest) — a
+//   program linked against the other library would not find them. See `SURVEY.md`.
+
+module sh.sysl.blas.c
+
+#if macos && !feature_openblas
+// Accelerate's BLAS: `-lcblas` resolves through the SDK's `libcblas.tbd` to
+// `Accelerate.framework/…/vecLib.framework/…/libBLAS.dylib`, the library `-framework Accelerate`
+// links (a `@link` names a library, never a `-framework` flag).
+@link("cblas")
+#else
+@link("openblas")
+#endif
+
+import sysl.math.complex.Complex
+
+// `CBLAS_ORDER`
+val ROW_MAJOR: i32 = 101
+val COL_MAJOR: i32 = 102
+
+// `CBLAS_TRANSPOSE`
+val NO_TRANS: i32 = 111
+val TRANS: i32 = 112
+val CONJ_TRANS: i32 = 113
+
+// `CBLAS_UPLO`
+val UPPER: i32 = 121
+val LOWER: i32 = 122
+
+// `CBLAS_DIAG`
+val NON_UNIT: i32 = 131
+val UNIT: i32 = 132
+
+// `CBLAS_SIDE`
+val LEFT: i32 = 141
+val RIGHT: i32 = 142
+
+extern "cblas_sdsdot" sdsdot(n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32) -> f32
+extern "cblas_dsdot" dsdot(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) -> f64
+extern "cblas_sdot" sdot(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) -> f32
+extern "cblas_ddot" ddot(n: i32, x: *f64, incx: i32, y: *f64, incy: i32) -> f64
+extern "cblas_cdotu_sub" cdotu_sub(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, dotu: *Complex[f32])
+extern "cblas_cdotc_sub" cdotc_sub(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, dotc: *Complex[f32])
+extern "cblas_zdotu_sub" zdotu_sub(n: i32, x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32, dotu: *Complex[f64])
+extern "cblas_zdotc_sub" zdotc_sub(n: i32, x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32, dotc: *Complex[f64])
+extern "cblas_snrm2" snrm2(n: i32, x: *f32, incx: i32) -> f32
+extern "cblas_sasum" sasum(n: i32, x: *f32, incx: i32) -> f32
+extern "cblas_dnrm2" dnrm2(n: i32, x: *f64, incx: i32) -> f64
+extern "cblas_dasum" dasum(n: i32, x: *f64, incx: i32) -> f64
+extern "cblas_scnrm2" scnrm2(n: i32, x: *Complex[f32], incx: i32) -> f32
+extern "cblas_scasum" scasum(n: i32, x: *Complex[f32], incx: i32) -> f32
+extern "cblas_dznrm2" dznrm2(n: i32, x: *Complex[f64], incx: i32) -> f64
+extern "cblas_dzasum" dzasum(n: i32, x: *Complex[f64], incx: i32) -> f64
+extern "cblas_isamax" isamax(n: i32, x: *f32, incx: i32) -> i32
+extern "cblas_idamax" idamax(n: i32, x: *f64, incx: i32) -> i32
+extern "cblas_icamax" icamax(n: i32, x: *Complex[f32], incx: i32) -> i32
+extern "cblas_izamax" izamax(n: i32, x: *Complex[f64], incx: i32) -> i32
+extern "cblas_sswap" sswap(n: i32, x: *f32, incx: i32, y: *f32, incy: i32)
+extern "cblas_scopy" scopy(n: i32, x: *f32, incx: i32, y: *f32, incy: i32)
+extern "cblas_saxpy" saxpy(n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32)
+extern "cblas_dswap" dswap(n: i32, x: *f64, incx: i32, y: *f64, incy: i32)
+extern "cblas_dcopy" dcopy(n: i32, x: *f64, incx: i32, y: *f64, incy: i32)
+extern "cblas_daxpy" daxpy(n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32)
+extern "cblas_cswap" cswap(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32)
+extern "cblas_ccopy" ccopy(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32)
+extern "cblas_caxpy" caxpy(n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32)
+extern "cblas_zswap" zswap(n: i32, x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32)
+extern "cblas_zcopy" zcopy(n: i32, x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32)
+extern "cblas_zaxpy" zaxpy(n: i32, alpha: *Complex[f64], x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32)
+extern "cblas_srotg" srotg(a: *f32, b: *f32, c: *f32, s: *f32)
+extern "cblas_srotmg" srotmg(d1: *f32, d2: *f32, b1: *f32, b2: f32, param: *f32)
+extern "cblas_srot" srot(n: i32, x: *f32, incx: i32, y: *f32, incy: i32, c: f32, s: f32)
+extern "cblas_srotm" srotm(n: i32, x: *f32, incx: i32, y: *f32, incy: i32, param: *f32)
+extern "cblas_drotg" drotg(a: *f64, b: *f64, c: *f64, s: *f64)
+extern "cblas_drotmg" drotmg(d1: *f64, d2: *f64, b1: *f64, b2: f64, param: *f64)
+extern "cblas_drot" drot(n: i32, x: *f64, incx: i32, y: *f64, incy: i32, c: f64, s: f64)
+extern "cblas_drotm" drotm(n: i32, x: *f64, incx: i32, y: *f64, incy: i32, param: *f64)
+extern "cblas_sscal" sscal(n: i32, alpha: f32, x: *f32, incx: i32)
+extern "cblas_dscal" dscal(n: i32, alpha: f64, x: *f64, incx: i32)
+extern "cblas_cscal" cscal(n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32)
+extern "cblas_zscal" zscal(n: i32, alpha: *Complex[f64], x: *Complex[f64], incx: i32)
+extern "cblas_csscal" csscal(n: i32, alpha: f32, x: *Complex[f32], incx: i32)
+extern "cblas_zdscal" zdscal(n: i32, alpha: f64, x: *Complex[f64], incx: i32)
+extern "cblas_crotg" crotg(a: *Complex[f32], b: *Complex[f32], c: *Complex[f32], s: *Complex[f32])
+extern "cblas_zrotg" zrotg(a: *Complex[f64], b: *Complex[f64], c: *Complex[f64], s: *Complex[f64])
+extern "cblas_csrot" csrot(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, c: f32, s: f32)
+extern "cblas_zdrot" zdrot(n: i32, x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32, c: f64, s: f64)
+extern "cblas_sgemv" sgemv(order: i32, trans_a: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+extern "cblas_sgbmv" sgbmv(order: i32, trans_a: i32, m: i32, n: i32, kl: i32, ku: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+extern "cblas_strmv" strmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, a: *f32, lda: i32, x: *f32, incx: i32)
+extern "cblas_stbmv" stbmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, k: i32, a: *f32, lda: i32, x: *f32, incx: i32)
+extern "cblas_stpmv" stpmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, ap: *f32, x: *f32, incx: i32)
+extern "cblas_strsv" strsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, a: *f32, lda: i32, x: *f32, incx: i32)
+extern "cblas_stbsv" stbsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, k: i32, a: *f32, lda: i32, x: *f32, incx: i32)
+extern "cblas_stpsv" stpsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, ap: *f32, x: *f32, incx: i32)
+extern "cblas_dgemv" dgemv(order: i32, trans_a: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+extern "cblas_dgbmv" dgbmv(order: i32, trans_a: i32, m: i32, n: i32, kl: i32, ku: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+extern "cblas_dtrmv" dtrmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, a: *f64, lda: i32, x: *f64, incx: i32)
+extern "cblas_dtbmv" dtbmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, k: i32, a: *f64, lda: i32, x: *f64, incx: i32)
+extern "cblas_dtpmv" dtpmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, ap: *f64, x: *f64, incx: i32)
+extern "cblas_dtrsv" dtrsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, a: *f64, lda: i32, x: *f64, incx: i32)
+extern "cblas_dtbsv" dtbsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, k: i32, a: *f64, lda: i32, x: *f64, incx: i32)
+extern "cblas_dtpsv" dtpsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, ap: *f64, x: *f64, incx: i32)
+extern "cblas_cgemv" cgemv(order: i32, trans_a: i32, m: i32, n: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32, beta: *Complex[f32], y: *Complex[f32], incy: i32)
+extern "cblas_cgbmv" cgbmv(order: i32, trans_a: i32, m: i32, n: i32, kl: i32, ku: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32, beta: *Complex[f32], y: *Complex[f32], incy: i32)
+extern "cblas_ctrmv" ctrmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32)
+extern "cblas_ctbmv" ctbmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, k: i32, a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32)
+extern "cblas_ctpmv" ctpmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, ap: *Complex[f32], x: *Complex[f32], incx: i32)
+extern "cblas_ctrsv" ctrsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32)
+extern "cblas_ctbsv" ctbsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, k: i32, a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32)
+extern "cblas_ctpsv" ctpsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, ap: *Complex[f32], x: *Complex[f32], incx: i32)
+extern "cblas_zgemv" zgemv(order: i32, trans_a: i32, m: i32, n: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, x: *Complex[f64], incx: i32, beta: *Complex[f64], y: *Complex[f64], incy: i32)
+extern "cblas_zgbmv" zgbmv(order: i32, trans_a: i32, m: i32, n: i32, kl: i32, ku: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, x: *Complex[f64], incx: i32, beta: *Complex[f64], y: *Complex[f64], incy: i32)
+extern "cblas_ztrmv" ztrmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, a: *Complex[f64], lda: i32, x: *Complex[f64], incx: i32)
+extern "cblas_ztbmv" ztbmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, k: i32, a: *Complex[f64], lda: i32, x: *Complex[f64], incx: i32)
+extern "cblas_ztpmv" ztpmv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, ap: *Complex[f64], x: *Complex[f64], incx: i32)
+extern "cblas_ztrsv" ztrsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, a: *Complex[f64], lda: i32, x: *Complex[f64], incx: i32)
+extern "cblas_ztbsv" ztbsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, k: i32, a: *Complex[f64], lda: i32, x: *Complex[f64], incx: i32)
+extern "cblas_ztpsv" ztpsv(order: i32, uplo: i32, trans_a: i32, diag: i32, n: i32, ap: *Complex[f64], x: *Complex[f64], incx: i32)
+extern "cblas_ssymv" ssymv(order: i32, uplo: i32, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+extern "cblas_ssbmv" ssbmv(order: i32, uplo: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+extern "cblas_sspmv" sspmv(order: i32, uplo: i32, n: i32, alpha: f32, ap: *f32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+extern "cblas_sger" sger(order: i32, m: i32, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32, lda: i32)
+extern "cblas_ssyr" ssyr(order: i32, uplo: i32, n: i32, alpha: f32, x: *f32, incx: i32, a: *f32, lda: i32)
+extern "cblas_sspr" sspr(order: i32, uplo: i32, n: i32, alpha: f32, x: *f32, incx: i32, ap: *f32)
+extern "cblas_ssyr2" ssyr2(order: i32, uplo: i32, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32, lda: i32)
+extern "cblas_sspr2" sspr2(order: i32, uplo: i32, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32)
+extern "cblas_dsymv" dsymv(order: i32, uplo: i32, n: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+extern "cblas_dsbmv" dsbmv(order: i32, uplo: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+extern "cblas_dspmv" dspmv(order: i32, uplo: i32, n: i32, alpha: f64, ap: *f64, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+extern "cblas_dger" dger(order: i32, m: i32, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64, lda: i32)
+extern "cblas_dsyr" dsyr(order: i32, uplo: i32, n: i32, alpha: f64, x: *f64, incx: i32, a: *f64, lda: i32)
+extern "cblas_dspr" dspr(order: i32, uplo: i32, n: i32, alpha: f64, x: *f64, incx: i32, ap: *f64)
+extern "cblas_dsyr2" dsyr2(order: i32, uplo: i32, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64, lda: i32)
+extern "cblas_dspr2" dspr2(order: i32, uplo: i32, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64)
+extern "cblas_chemv" chemv(order: i32, uplo: i32, n: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32, beta: *Complex[f32], y: *Complex[f32], incy: i32)
+extern "cblas_chbmv" chbmv(order: i32, uplo: i32, n: i32, k: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, x: *Complex[f32], incx: i32, beta: *Complex[f32], y: *Complex[f32], incy: i32)
+extern "cblas_chpmv" chpmv(order: i32, uplo: i32, n: i32, alpha: *Complex[f32], ap: *Complex[f32], x: *Complex[f32], incx: i32, beta: *Complex[f32], y: *Complex[f32], incy: i32)
+extern "cblas_cgeru" cgeru(order: i32, m: i32, n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, a: *Complex[f32], lda: i32)
+extern "cblas_cgerc" cgerc(order: i32, m: i32, n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, a: *Complex[f32], lda: i32)
+extern "cblas_cher" cher(order: i32, uplo: i32, n: i32, alpha: f32, x: *Complex[f32], incx: i32, a: *Complex[f32], lda: i32)
+extern "cblas_chpr" chpr(order: i32, uplo: i32, n: i32, alpha: f32, x: *Complex[f32], incx: i32, a: *Complex[f32])
+extern "cblas_cher2" cher2(order: i32, uplo: i32, n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, a: *Complex[f32], lda: i32)
+extern "cblas_chpr2" chpr2(order: i32, uplo: i32, n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, ap: *Complex[f32])
+extern "cblas_zhemv" zhemv(order: i32, uplo: i32, n: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, x: *Complex[f64], incx: i32, beta: *Complex[f64], y: *Complex[f64], incy: i32)
+extern "cblas_zhbmv" zhbmv(order: i32, uplo: i32, n: i32, k: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, x: *Complex[f64], incx: i32, beta: *Complex[f64], y: *Complex[f64], incy: i32)
+extern "cblas_zhpmv" zhpmv(order: i32, uplo: i32, n: i32, alpha: *Complex[f64], ap: *Complex[f64], x: *Complex[f64], incx: i32, beta: *Complex[f64], y: *Complex[f64], incy: i32)
+extern "cblas_zgeru" zgeru(order: i32, m: i32, n: i32, alpha: *Complex[f64], x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32, a: *Complex[f64], lda: i32)
+extern "cblas_zgerc" zgerc(order: i32, m: i32, n: i32, alpha: *Complex[f64], x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32, a: *Complex[f64], lda: i32)
+extern "cblas_zher" zher(order: i32, uplo: i32, n: i32, alpha: f64, x: *Complex[f64], incx: i32, a: *Complex[f64], lda: i32)
+extern "cblas_zhpr" zhpr(order: i32, uplo: i32, n: i32, alpha: f64, x: *Complex[f64], incx: i32, a: *Complex[f64])
+extern "cblas_zher2" zher2(order: i32, uplo: i32, n: i32, alpha: *Complex[f64], x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32, a: *Complex[f64], lda: i32)
+extern "cblas_zhpr2" zhpr2(order: i32, uplo: i32, n: i32, alpha: *Complex[f64], x: *Complex[f64], incx: i32, y: *Complex[f64], incy: i32, ap: *Complex[f64])
+extern "cblas_sgemm" sgemm(order: i32, trans_a: i32, trans_b: i32, m: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32, beta: f32, c: *f32, ldc: i32)
+extern "cblas_ssymm" ssymm(order: i32, side: i32, uplo: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32, beta: f32, c: *f32, ldc: i32)
+extern "cblas_ssyrk" ssyrk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, beta: f32, c: *f32, ldc: i32)
+extern "cblas_ssyr2k" ssyr2k(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32, beta: f32, c: *f32, ldc: i32)
+extern "cblas_strmm" strmm(order: i32, side: i32, uplo: i32, trans_a: i32, diag: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32)
+extern "cblas_strsm" strsm(order: i32, side: i32, uplo: i32, trans_a: i32, diag: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32)
+extern "cblas_dgemm" dgemm(order: i32, trans_a: i32, trans_b: i32, m: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32, beta: f64, c: *f64, ldc: i32)
+extern "cblas_dsymm" dsymm(order: i32, side: i32, uplo: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32, beta: f64, c: *f64, ldc: i32)
+extern "cblas_dsyrk" dsyrk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, beta: f64, c: *f64, ldc: i32)
+extern "cblas_dsyr2k" dsyr2k(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32, beta: f64, c: *f64, ldc: i32)
+extern "cblas_dtrmm" dtrmm(order: i32, side: i32, uplo: i32, trans_a: i32, diag: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32)
+extern "cblas_dtrsm" dtrsm(order: i32, side: i32, uplo: i32, trans_a: i32, diag: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32)
+extern "cblas_cgemm" cgemm(order: i32, trans_a: i32, trans_b: i32, m: i32, n: i32, k: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32, beta: *Complex[f32], c: *Complex[f32], ldc: i32)
+extern "cblas_csymm" csymm(order: i32, side: i32, uplo: i32, m: i32, n: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32, beta: *Complex[f32], c: *Complex[f32], ldc: i32)
+extern "cblas_csyrk" csyrk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, beta: *Complex[f32], c: *Complex[f32], ldc: i32)
+extern "cblas_csyr2k" csyr2k(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32, beta: *Complex[f32], c: *Complex[f32], ldc: i32)
+extern "cblas_ctrmm" ctrmm(order: i32, side: i32, uplo: i32, trans_a: i32, diag: i32, m: i32, n: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32)
+extern "cblas_ctrsm" ctrsm(order: i32, side: i32, uplo: i32, trans_a: i32, diag: i32, m: i32, n: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32)
+extern "cblas_zgemm" zgemm(order: i32, trans_a: i32, trans_b: i32, m: i32, n: i32, k: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, b: *Complex[f64], ldb: i32, beta: *Complex[f64], c: *Complex[f64], ldc: i32)
+extern "cblas_zsymm" zsymm(order: i32, side: i32, uplo: i32, m: i32, n: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, b: *Complex[f64], ldb: i32, beta: *Complex[f64], c: *Complex[f64], ldc: i32)
+extern "cblas_zsyrk" zsyrk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, beta: *Complex[f64], c: *Complex[f64], ldc: i32)
+extern "cblas_zsyr2k" zsyr2k(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, b: *Complex[f64], ldb: i32, beta: *Complex[f64], c: *Complex[f64], ldc: i32)
+extern "cblas_ztrmm" ztrmm(order: i32, side: i32, uplo: i32, trans_a: i32, diag: i32, m: i32, n: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, b: *Complex[f64], ldb: i32)
+extern "cblas_ztrsm" ztrsm(order: i32, side: i32, uplo: i32, trans_a: i32, diag: i32, m: i32, n: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, b: *Complex[f64], ldb: i32)
+extern "cblas_chemm" chemm(order: i32, side: i32, uplo: i32, m: i32, n: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32, beta: *Complex[f32], c: *Complex[f32], ldc: i32)
+extern "cblas_cherk" cherk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f32, a: *Complex[f32], lda: i32, beta: f32, c: *Complex[f32], ldc: i32)
+extern "cblas_cher2k" cher2k(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32, beta: f32, c: *Complex[f32], ldc: i32)
+extern "cblas_zhemm" zhemm(order: i32, side: i32, uplo: i32, m: i32, n: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, b: *Complex[f64], ldb: i32, beta: *Complex[f64], c: *Complex[f64], ldc: i32)
+extern "cblas_zherk" zherk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f64, a: *Complex[f64], lda: i32, beta: f64, c: *Complex[f64], ldc: i32)
+extern "cblas_zher2k" zher2k(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: *Complex[f64], a: *Complex[f64], lda: i32, b: *Complex[f64], ldb: i32, beta: f64, c: *Complex[f64], ldc: i32)

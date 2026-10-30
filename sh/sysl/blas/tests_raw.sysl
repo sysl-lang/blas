@@ -1,0 +1,373 @@
+module sh.sysl.blas
+@tests
+
+import sh.sysl.blas.c
+import sysl.math.complex.Complex
+import sysl.slices.as_mut_ptr
+
+// The raw layer's routines that the views do not cover, each against arithmetic done by hand on
+// small integer-valued operands (exact, so `==`), or against an identity whose two sides are separate
+// calls — `trsm` undoing `trmm`, `trsv` undoing `trmv`. Column-major throughout, as nex calls BLAS.
+//
+// **A triangular or symmetric operand's unused triangle holds 99**, so a routine that read the wrong
+// triangle would be seen to.
+
+private z(re: real, im: real) -> Complex[real] = Complex(re, im)
+
+// -- level 1 -----------------------------------------------------------------------------------------
+
+@test
+rotg_builds_the_rotation_that_zeroes_b()
+    var a = 3.0
+    var b = 4.0
+    var cs = 0.0
+    var sn = 0.0
+
+    c.drotg(&a, &b, &cs, &sn)
+    assert(a == 5.0 && cs == 0.6 && sn == 0.8, s"r = $a, c = $cs, s = $sn")
+
+@test
+rot_applies_a_plane_rotation()
+    var x = [1.0, 2.0]
+    var y = [3.0, 4.0]
+
+    // c = 0, s = 1: x ← y, y ← −x
+    c.drot(2, as_mut_ptr(x[..]), 1, as_mut_ptr(y[..]), 1, 0.0, 1.0)
+    assert(x[0] == 3.0 && x[1] == 4.0 && y[0] == -1.0 && y[1] == -2.0, "a quarter turn")
+
+    var cx = [z(1.0, 1.0)]
+    var cy = [z(0.0, 2.0)]
+
+    c.zdrot(1, as_mut_ptr(cx[..]), 1, as_mut_ptr(cy[..]), 1, 0.0, -1.0)
+    assert(cx[0] == z(0.0, -2.0) && cy[0] == z(1.0, 1.0), "zdrot: a real rotation of complex vectors")
+
+@test
+rotm_applies_the_full_matrix_form()
+    var x = [1.0, 2.0]
+    var y = [1.0, -1.0]
+    // flag −1: H = [[h11, h12], [h21, h22]] = [[1, 3], [2, 4]], stored h11, h21, h12, h22
+    var p = [-1.0, 1.0, 2.0, 3.0, 4.0]
+
+    c.drotm(2, as_mut_ptr(x[..]), 1, as_mut_ptr(y[..]), 1, as_mut_ptr(p[..]))
+    assert(x[0] == 4.0 && y[0] == 6.0, "x' = 1+3, y' = 2+4")
+    assert(x[1] == -1.0 && y[1] == 0.0, "x' = 2−3, y' = 4−4")
+
+@test
+iamax_answers_the_first_largest_from_zero()
+    var x = [1.0, -7.0, 3.0, 7.0]
+    var w = [z(3.0, 0.0), z(-2.0, -2.0), z(0.0, 3.5)]
+
+    assert_eq(c.idamax(4, as_mut_ptr(x[..]), 1), 1, "|−7| first")
+    assert_eq(c.idamax(2, as_mut_ptr(x[..]), 2), 1, "of (1, 3)")
+
+    // BLAS measures a complex element by |re| + |im|: 3, 4, 3.5.
+    assert_eq(c.izamax(3, as_mut_ptr(w[..]), 1), 1, "|−2| + |−2|")
+
+@test
+swap_and_copy_honour_their_increments()
+    var x = [1.0, 2.0, 3.0]
+    var y = [4.0, 0.0, 5.0, 0.0, 6.0]
+
+    c.dswap(3, as_mut_ptr(x[..]), 1, as_mut_ptr(y[..]), 2)
+    assert(x[0] == 4.0 && x[2] == 6.0 && y[0] == 1.0 && y[4] == 3.0 && y[1] == 0.0, "swap at 1 and 2")
+
+    var d = [0.0, 0.0, 0.0]
+
+    c.dcopy(3, as_mut_ptr(x[..]), 1, as_mut_ptr(d[..]), -1)
+    assert(d[0] == 6.0 && d[1] == 5.0 && d[2] == 4.0, "copy into a reversed vector")
+
+@test
+the_mixed_precision_dots()
+    var x: [2]f32 = [1.0, 2.0]
+    var y: [2]f32 = [3.0, 4.0]
+
+    assert_eq(c.sdsdot(2, 10.0, as_mut_ptr(x[..]), 1, as_mut_ptr(y[..]), 1), 21.0, "10 + 3 + 8")
+    assert_eq(c.dsdot(2, as_mut_ptr(x[..]), 1, as_mut_ptr(y[..]), 1), 11.0, "accumulated in double")
+
+@test
+the_real_scalings_of_complex_vectors()
+    var x = [z(1.0, -2.0)]
+    var s: [1]Complex[f32] = [Complex(1.0, -2.0)]
+
+    c.zdscal(1, 3.0, as_mut_ptr(x[..]), 1)
+    c.csscal(1, -1.0, as_mut_ptr(s[..]), 1)
+    assert(x[0] == z(3.0, -6.0) && s[0] == Complex(-1.0, 2.0), "zdscal, csscal")
+
+// -- level 2 -----------------------------------------------------------------------------------------
+
+// A tridiagonal [[1, 2, 0], [3, 4, 5], [0, 6, 7]] in band storage (kl = ku = 1, lda = 3): column j
+// holds A(i, j) at row ku + i − j.
+@test
+gbmv_reads_band_storage()
+    var ab = [99.0, 1.0, 3.0, 2.0, 4.0, 6.0, 5.0, 7.0, 99.0]
+    var x = [1.0, 1.0, 1.0]
+    var y = [0.0, 0.0, 0.0]
+
+    c.dgbmv(c.COL_MAJOR, c.NO_TRANS, 3, 3, 1, 1, 1.0, as_mut_ptr(ab[..]), 3, as_mut_ptr(x[..]), 1, 0.0, as_mut_ptr(y[..]), 1)
+    assert(y[0] == 3.0 && y[1] == 12.0 && y[2] == 13.0, s"got ${y[0]} ${y[1]} ${y[2]}")
+
+    c.dgbmv(c.COL_MAJOR, c.TRANS, 3, 3, 1, 1, 1.0, as_mut_ptr(ab[..]), 3, as_mut_ptr(x[..]), 1, 0.0, as_mut_ptr(y[..]), 1)
+    assert(y[0] == 4.0 && y[1] == 12.0 && y[2] == 12.0, "Aᵀ·1: the column sums")
+
+@test
+symv_reads_one_triangle()
+    // [[1, 2], [2, 3]]: the upper triangle stored, 99 below it.
+    var a = [1.0, 99.0, 2.0, 3.0]
+    var x = [1.0, 1.0]
+    var y = [0.0, 0.0]
+
+    c.dsymv(c.COL_MAJOR, c.UPPER, 2, 1.0, as_mut_ptr(a[..]), 2, as_mut_ptr(x[..]), 1, 0.0, as_mut_ptr(y[..]), 1)
+    assert(y[0] == 3.0 && y[1] == 5.0, "upper")
+
+    var l = [1.0, 2.0, 99.0, 3.0]
+
+    c.dsymv(c.COL_MAJOR, c.LOWER, 2, 1.0, as_mut_ptr(l[..]), 2, as_mut_ptr(x[..]), 1, 0.0, as_mut_ptr(y[..]), 1)
+    assert(y[0] == 3.0 && y[1] == 5.0, "lower")
+
+@test
+hemv_conjugates_the_stored_triangle()
+    // [[1, i], [−i, 2]]: the upper triangle stored; the diagonal's imaginary parts are not read.
+    var a = [z(1.0, 5.0), z(99.0, 99.0), z(0.0, 1.0), z(2.0, 5.0)]
+    var x = [z(1.0, 0.0), z(1.0, 0.0)]
+    var y = [z(0.0, 0.0), z(0.0, 0.0)]
+    var one = z(1.0, 0.0)
+    var zero = z(0.0, 0.0)
+
+    c.zhemv(c.COL_MAJOR, c.UPPER, 2, &one, as_mut_ptr(a[..]), 2, as_mut_ptr(x[..]), 1, &zero, as_mut_ptr(y[..]), 1)
+    assert(y[0] == z(1.0, 1.0) && y[1] == z(2.0, -1.0), s"got ${y[0]}, ${y[1]}")
+
+@test
+trmv_and_trsv_undo_each_other()
+    // [[2, 3, 1], [0, 4, 5], [0, 0, 8]] upper, 99 below.
+    var a = [2.0, 99.0, 99.0, 3.0, 4.0, 99.0, 1.0, 5.0, 8.0]
+    var x = [1.0, 2.0, 3.0]
+
+    c.dtrmv(c.COL_MAJOR, c.UPPER, c.NO_TRANS, c.NON_UNIT, 3, as_mut_ptr(a[..]), 3, as_mut_ptr(x[..]), 1)
+    assert(x[0] == 11.0 && x[1] == 23.0 && x[2] == 24.0, "A·(1, 2, 3)")
+
+    c.dtrsv(c.COL_MAJOR, c.UPPER, c.NO_TRANS, c.NON_UNIT, 3, as_mut_ptr(a[..]), 3, as_mut_ptr(x[..]), 1)
+    assert(x[0] == 1.0 && x[1] == 2.0 && x[2] == 3.0, "solved back")
+
+    // A unit diagonal is not read: [[1, 3, 1], [0, 1, 5], [0, 0, 1]]ᵀ·(1, 1, 1) = (1, 4, 7)
+    var y = [1.0, 1.0, 1.0]
+
+    c.dtrmv(c.COL_MAJOR, c.UPPER, c.TRANS, c.UNIT, 3, as_mut_ptr(a[..]), 3, as_mut_ptr(y[..]), 1)
+    assert(y[0] == 1.0 && y[1] == 4.0 && y[2] == 7.0, "unit, transposed")
+
+@test
+packed_and_banded_triangles()
+    // [[2, 3], [0, 4]] upper: packed (2, 3, 4); banded with k = 1, lda 2: (99, 2), (3, 4).
+    var ap = [2.0, 3.0, 4.0]
+    var ab = [99.0, 2.0, 3.0, 4.0]
+    var x = [1.0, 1.0]
+
+    c.dtpmv(c.COL_MAJOR, c.UPPER, c.NO_TRANS, c.NON_UNIT, 2, as_mut_ptr(ap[..]), as_mut_ptr(x[..]), 1)
+    assert(x[0] == 5.0 && x[1] == 4.0, "tpmv")
+    c.dtpsv(c.COL_MAJOR, c.UPPER, c.NO_TRANS, c.NON_UNIT, 2, as_mut_ptr(ap[..]), as_mut_ptr(x[..]), 1)
+    assert(x[0] == 1.0 && x[1] == 1.0, "tpsv")
+
+    c.dtbmv(c.COL_MAJOR, c.UPPER, c.NO_TRANS, c.NON_UNIT, 2, 1, as_mut_ptr(ab[..]), 2, as_mut_ptr(x[..]), 1)
+    assert(x[0] == 5.0 && x[1] == 4.0, "tbmv")
+    c.dtbsv(c.COL_MAJOR, c.UPPER, c.NO_TRANS, c.NON_UNIT, 2, 1, as_mut_ptr(ab[..]), 2, as_mut_ptr(x[..]), 1)
+    assert(x[0] == 1.0 && x[1] == 1.0, "tbsv")
+
+@test
+packed_and_banded_symmetric_and_hermitian()
+    // [[1, 2], [2, 3]]
+    var sp = [1.0, 2.0, 3.0]
+    var sb = [99.0, 1.0, 2.0, 3.0]
+    var x = [1.0, 1.0]
+    var y = [0.0, 0.0]
+
+    c.dspmv(c.COL_MAJOR, c.UPPER, 2, 1.0, as_mut_ptr(sp[..]), as_mut_ptr(x[..]), 1, 0.0, as_mut_ptr(y[..]), 1)
+    assert(y[0] == 3.0 && y[1] == 5.0, "spmv")
+    c.dsbmv(c.COL_MAJOR, c.UPPER, 2, 1, 2.0, as_mut_ptr(sb[..]), 2, as_mut_ptr(x[..]), 1, 0.0, as_mut_ptr(y[..]), 1)
+    assert(y[0] == 6.0 && y[1] == 10.0, "sbmv, α = 2")
+
+    // [[1, i], [−i, 2]]
+    var hp = [z(1.0, 0.0), z(0.0, 1.0), z(2.0, 0.0)]
+    var hb = [z(99.0, 0.0), z(1.0, 0.0), z(0.0, 1.0), z(2.0, 0.0)]
+    var cx = [z(1.0, 0.0), z(1.0, 0.0)]
+    var cy = [z(0.0, 0.0), z(0.0, 0.0)]
+    var one = z(1.0, 0.0)
+    var zero = z(0.0, 0.0)
+
+    c.zhpmv(c.COL_MAJOR, c.UPPER, 2, &one, as_mut_ptr(hp[..]), as_mut_ptr(cx[..]), 1, &zero, as_mut_ptr(cy[..]), 1)
+    assert(cy[0] == z(1.0, 1.0) && cy[1] == z(2.0, -1.0), "hpmv")
+    c.zhbmv(c.COL_MAJOR, c.UPPER, 2, 1, &one, as_mut_ptr(hb[..]), 2, as_mut_ptr(cx[..]), 1, &zero, as_mut_ptr(cy[..]), 1)
+    assert(cy[0] == z(1.0, 1.0) && cy[1] == z(2.0, -1.0), "hbmv")
+
+@test
+the_rank_one_updates()
+    var a = [0.0, 0.0, 0.0, 0.0]
+    var x = [1.0, 2.0]
+    var y = [3.0, 4.0]
+
+    c.dger(c.COL_MAJOR, 2, 2, 1.0, as_mut_ptr(x[..]), 1, as_mut_ptr(y[..]), 1, as_mut_ptr(a[..]), 2)
+    assert(a[0] == 3.0 && a[1] == 6.0 && a[2] == 4.0 && a[3] == 8.0, "x·yᵀ")
+
+    var s = [0.0, 99.0, 0.0, 0.0]
+
+    c.dsyr(c.COL_MAJOR, c.UPPER, 2, 1.0, as_mut_ptr(x[..]), 1, as_mut_ptr(s[..]), 2)
+    assert(s[0] == 1.0 && s[2] == 2.0 && s[3] == 4.0 && s[1] == 99.0, "x·xᵀ, upper only")
+
+    var s2 = [0.0, 99.0, 0.0, 0.0]
+
+    c.dsyr2(c.COL_MAJOR, c.UPPER, 2, 1.0, as_mut_ptr(x[..]), 1, as_mut_ptr(y[..]), 1, as_mut_ptr(s2[..]), 2)
+    assert(s2[0] == 6.0 && s2[2] == 10.0 && s2[3] == 16.0 && s2[1] == 99.0, "x·yᵀ + y·xᵀ, upper only")
+
+    var p = [0.0, 0.0, 0.0]
+    var p2 = [0.0, 0.0, 0.0]
+
+    c.dspr(c.COL_MAJOR, c.UPPER, 2, 1.0, as_mut_ptr(x[..]), 1, as_mut_ptr(p[..]))
+    c.dspr2(c.COL_MAJOR, c.UPPER, 2, 1.0, as_mut_ptr(x[..]), 1, as_mut_ptr(y[..]), 1, as_mut_ptr(p2[..]))
+    assert(p[0] == 1.0 && p[1] == 2.0 && p[2] == 4.0, "spr")
+    assert(p2[0] == 6.0 && p2[1] == 10.0 && p2[2] == 16.0, "spr2")
+
+@test
+the_complex_rank_one_updates()
+    var cx = [z(0.0, 1.0)]
+    var cy = [z(0.0, 1.0)]
+    var one = z(1.0, 0.0)
+    var u = [z(0.0, 0.0)]
+    var v = [z(0.0, 0.0)]
+
+    c.zgeru(c.COL_MAJOR, 1, 1, &one, as_mut_ptr(cx[..]), 1, as_mut_ptr(cy[..]), 1, as_mut_ptr(u[..]), 1)
+    c.zgerc(c.COL_MAJOR, 1, 1, &one, as_mut_ptr(cx[..]), 1, as_mut_ptr(cy[..]), 1, as_mut_ptr(v[..]), 1)
+    assert(u[0] == z(-1.0, 0.0) && v[0] == z(1.0, 0.0), "i·i and i·conj(i)")
+
+    // x = (1, i): x·xᴴ = [[1, −i], [i, 1]]; the upper triangle holds −i at (0, 1).
+    var x = [z(1.0, 0.0), z(0.0, 1.0)]
+    var h = [z(0.0, 0.0), z(99.0, 0.0), z(0.0, 0.0), z(0.0, 0.0)]
+
+    c.zher(c.COL_MAJOR, c.UPPER, 2, 1.0, as_mut_ptr(x[..]), 1, as_mut_ptr(h[..]), 2)
+    assert(h[0] == z(1.0, 0.0) && h[2] == z(0.0, -1.0) && h[3] == z(1.0, 0.0) && h[1] == z(99.0, 0.0), "her")
+
+    var h2 = [z(0.0, 0.0), z(99.0, 0.0), z(0.0, 0.0), z(0.0, 0.0)]
+
+    // x·xᴴ + x·xᴴ = 2·x·xᴴ
+    c.zher2(c.COL_MAJOR, c.UPPER, 2, &one, as_mut_ptr(x[..]), 1, as_mut_ptr(x[..]), 1, as_mut_ptr(h2[..]), 2)
+    assert(h2[0] == z(2.0, 0.0) && h2[2] == z(0.0, -2.0) && h2[3] == z(2.0, 0.0), "her2")
+
+    var hp = [z(0.0, 0.0), z(0.0, 0.0), z(0.0, 0.0)]
+    var hp2 = [z(0.0, 0.0), z(0.0, 0.0), z(0.0, 0.0)]
+
+    c.zhpr(c.COL_MAJOR, c.UPPER, 2, 1.0, as_mut_ptr(x[..]), 1, as_mut_ptr(hp[..]))
+    c.zhpr2(c.COL_MAJOR, c.UPPER, 2, &one, as_mut_ptr(x[..]), 1, as_mut_ptr(x[..]), 1, as_mut_ptr(hp2[..]))
+    assert(hp[1] == z(0.0, -1.0) && hp2[1] == z(0.0, -2.0), "hpr, hpr2")
+
+// -- level 3 -----------------------------------------------------------------------------------------
+
+@test
+symm_and_hemm_read_one_triangle()
+    var a = [1.0, 99.0, 2.0, 3.0]           // [[1, 2], [2, 3]], upper
+    var b = [1.0, 0.0, 0.0, 1.0]
+    var cm = [0.0, 0.0, 0.0, 0.0]
+
+    c.dsymm(c.COL_MAJOR, c.LEFT, c.UPPER, 2, 2, 1.0, as_mut_ptr(a[..]), 2, as_mut_ptr(b[..]), 2, 0.0, as_mut_ptr(cm[..]), 2)
+    assert(cm[0] == 1.0 && cm[1] == 2.0 && cm[2] == 2.0 && cm[3] == 3.0, "A·I = A, both triangles")
+    c.dsymm(c.COL_MAJOR, c.RIGHT, c.UPPER, 2, 2, 1.0, as_mut_ptr(a[..]), 2, as_mut_ptr(b[..]), 2, 0.0, as_mut_ptr(cm[..]), 2)
+    assert(cm[1] == 2.0 && cm[2] == 2.0, "I·A = A")
+
+    var h = [z(1.0, 0.0), z(99.0, 0.0), z(0.0, 1.0), z(2.0, 0.0)]       // [[1, i], [−i, 2]]
+    var id = [z(1.0, 0.0), z(0.0, 0.0), z(0.0, 0.0), z(1.0, 0.0)]
+    var hc = [z(0.0, 0.0), z(0.0, 0.0), z(0.0, 0.0), z(0.0, 0.0)]
+    var one = z(1.0, 0.0)
+    var zero = z(0.0, 0.0)
+
+    c.zhemm(c.COL_MAJOR, c.LEFT, c.UPPER, 2, 2, &one, as_mut_ptr(h[..]), 2, as_mut_ptr(id[..]), 2, &zero, as_mut_ptr(hc[..]), 2)
+    assert(hc[1] == z(0.0, -1.0) && hc[2] == z(0.0, 1.0), "the lower triangle is the conjugate")
+
+@test
+syrk_herk_syr2k_her2k_fill_the_upper_triangle()
+    var a = [1.0, 2.0]                     // 2 × 1
+    var b = [3.0, 4.0]
+    var cm = [0.0, 99.0, 0.0, 0.0]
+
+    c.dsyrk(c.COL_MAJOR, c.UPPER, c.NO_TRANS, 2, 1, 1.0, as_mut_ptr(a[..]), 2, 0.0, as_mut_ptr(cm[..]), 2)
+    assert(cm[0] == 1.0 && cm[2] == 2.0 && cm[3] == 4.0 && cm[1] == 99.0, "A·Aᵀ")
+
+    c.dsyr2k(c.COL_MAJOR, c.UPPER, c.NO_TRANS, 2, 1, 1.0, as_mut_ptr(a[..]), 2, as_mut_ptr(b[..]), 2, 0.0, as_mut_ptr(cm[..]), 2)
+    assert(cm[0] == 6.0 && cm[2] == 10.0 && cm[3] == 16.0, "A·Bᵀ + B·Aᵀ")
+
+    // Aᵀ·A with A 2 × 1 stored as above and trans = T: a 1 × 1 answer, 1 + 4.
+    var one1 = [0.0]
+
+    c.dsyrk(c.COL_MAJOR, c.UPPER, c.TRANS, 1, 2, 1.0, as_mut_ptr(a[..]), 2, 0.0, as_mut_ptr(one1[..]), 1)
+    assert(one1[0] == 5.0, "Aᵀ·A")
+
+    var x = [z(0.0, 1.0), z(1.0, 0.0)]     // 2 × 1
+    var h = [z(0.0, 0.0), z(99.0, 0.0), z(0.0, 0.0), z(0.0, 0.0)]
+    var one = z(1.0, 0.0)
+
+    c.zherk(c.COL_MAJOR, c.UPPER, c.NO_TRANS, 2, 1, 1.0, as_mut_ptr(x[..]), 2, 0.0, as_mut_ptr(h[..]), 2)
+    assert(h[0] == z(1.0, 0.0) && h[2] == z(0.0, 1.0) && h[3] == z(1.0, 0.0), "A·Aᴴ: (0, 1) is i·conj(1)")
+
+    c.zher2k(c.COL_MAJOR, c.UPPER, c.NO_TRANS, 2, 1, &one, as_mut_ptr(x[..]), 2, as_mut_ptr(x[..]), 2, 0.0, as_mut_ptr(h[..]), 2)
+    assert(h[2] == z(0.0, 2.0), "her2k: twice")
+
+    var s = [z(0.0, 0.0), z(99.0, 0.0), z(0.0, 0.0), z(0.0, 0.0)]
+    var zero = z(0.0, 0.0)
+
+    c.zsyrk(c.COL_MAJOR, c.UPPER, c.NO_TRANS, 2, 1, &one, as_mut_ptr(x[..]), 2, &zero, as_mut_ptr(s[..]), 2)
+    assert(s[0] == z(-1.0, 0.0) && s[2] == z(0.0, 1.0), "zsyrk does not conjugate: i·i = −1")
+
+// `trsm` undoes `trmm` for every side, triangle, transpose and diagonal. The diagonal holds powers of
+// two and the off-diagonal small integers, so both directions are exact.
+@test
+trsm_undoes_trmm_for_every_flag()
+    // [[2, 1, 3], [1, 4, 1], [2, 1, 0.5]]: as an upper triangle (2, 1, 3; 4, 1; 0.5), as a lower one
+    // (2; 1, 4; 2, 1, 0.5).
+    var a = [2.0, 1.0, 2.0, 1.0, 4.0, 1.0, 3.0, 1.0, 0.5]
+    var b0 = [1.0, -2.0, 3.0, 0.0, 5.0, -1.0, 2.0, 2.0, -3.0, 1.0, 1.0, 4.0]     // 3 × 4
+
+    for side in [c.LEFT, c.RIGHT]
+        for uplo in [c.UPPER, c.LOWER]
+            for trans in [c.NO_TRANS, c.TRANS]
+                for diag in [c.NON_UNIT, c.UNIT]
+                    // Left: B is 3 × 4 (ld 3); right: B is 4 × 3 (ld 4) — the same twelve numbers.
+                    val (m, n, ldb) = if side == c.LEFT then (3, 4, 3) else (4, 3, 4)
+                    var b = b0
+
+                    c.dtrmm(c.COL_MAJOR, side, uplo, trans, diag, m, n, 1.0, as_mut_ptr(a[..]), 3, as_mut_ptr(b[..]), ldb)
+
+                    var moved = false
+
+                    for k in 0..<12
+                        if b[k] != b0[k] then moved = true
+
+                    assert(moved, s"trmm changed B ($side $uplo $trans $diag)")
+
+                    c.dtrsm(c.COL_MAJOR, side, uplo, trans, diag, m, n, 1.0, as_mut_ptr(a[..]), 3, as_mut_ptr(b[..]), ldb)
+                    for k in 0..<12 do assert_eq(b[k], b0[k], s"element $k ($side $uplo $trans $diag)")
+
+@test
+ztrsm_undoes_ztrmm_conjugate_transposed()
+    var a = [z(2.0, 0.0), z(99.0, 0.0), z(1.0, 1.0), z(0.0, 4.0)]    // [[2, 1+i], [0, 4i]] upper
+    var b0 = [z(1.0, 0.0), z(0.0, -1.0), z(2.0, 3.0), z(-1.0, 1.0)]
+    var b = b0
+    var one = z(1.0, 0.0)
+
+    c.ztrmm(c.COL_MAJOR, c.LEFT, c.UPPER, c.CONJ_TRANS, c.NON_UNIT, 2, 2, &one, as_mut_ptr(a[..]), 2, as_mut_ptr(b[..]), 2)
+    // Aᴴ = [[2, 0], [1−i, −4i]]; column 0 of Aᴴ·B: (2, (1−i)·1 + (−4i)(−i)) = (2, −3 − i)
+    assert(b[0] == z(2.0, 0.0) && b[1] == z(-3.0, -1.0), s"got ${b[0]}, ${b[1]}")
+
+    c.ztrsm(c.COL_MAJOR, c.LEFT, c.UPPER, c.CONJ_TRANS, c.NON_UNIT, 2, 2, &one, as_mut_ptr(a[..]), 2, as_mut_ptr(b[..]), 2)
+    for k in 0..<4 do assert_eq(b[k], b0[k], s"element $k")
+
+@test
+sgemm_and_cgemm_through_the_raw_layer()
+    var a: [4]f32 = [1.0, 2.0, 3.0, 4.0]
+    var cm: [4]f32 = [0.0, 0.0, 0.0, 0.0]
+
+    // Aᵀ·A for [[1, 3], [2, 4]] = [[5, 11], [11, 25]]
+    c.sgemm(c.COL_MAJOR, c.TRANS, c.NO_TRANS, 2, 2, 2, 1.0, as_mut_ptr(a[..]), 2, as_mut_ptr(a[..]), 2, 0.0, as_mut_ptr(cm[..]), 2)
+    assert(cm[0] == 5.0 && cm[1] == 11.0 && cm[2] == 11.0 && cm[3] == 25.0, "sgemm")
+
+    var ca: [1]Complex[f32] = [Complex(0.0, 1.0)]
+    var cc: [1]Complex[f32] = [Complex(0.0, 0.0)]
+    var one: Complex[f32] = Complex(1.0, 0.0)
+    var zero: Complex[f32] = Complex(0.0, 0.0)
+
+    c.cgemm(c.COL_MAJOR, c.CONJ_TRANS, c.NO_TRANS, 1, 1, 1, &one, as_mut_ptr(ca[..]), 1, as_mut_ptr(ca[..]), 1, &zero, as_mut_ptr(cc[..]), 1)
+    assert(cc[0] == Complex(1.0, 0.0), "conj(i)·i")

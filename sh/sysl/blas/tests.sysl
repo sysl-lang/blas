@@ -1,0 +1,487 @@
+module sh.sysl.blas
+@tests
+
+import sysl.buf.{Buf, buf}
+import sysl.math.complex.Complex
+
+// The views and the routines over them, run by `sysl test .` against the library the build linked.
+//
+// **The oracle is never BLAS read back against itself.** It is arithmetic done by hand on small
+// integer-valued operands (exact in floating point, so `==` is the comparison), an identity whose two
+// sides are computed by different calls (`A·I = A`, `(AB)ᵀ = BᵀAᵀ`), or numpy's answer for a larger
+// product, pasted in: operands that are multiples of 1/8 and 1/4, so every partial sum is exact
+// whatever order a library sums in and the comparison stays `==`.
+
+private fails_with[T](r: Result[T, BlasError], want: BlasError) -> bool = r match
+    Ok(_) -> false
+    Err(e) -> e == want
+
+// A norm is the one answer here that is not exact: each library scales its sum of squares its own
+// way, so the last bit may differ from numpy's.
+private near(got: real, want: real) -> bool = (if got > want then got - want else want - got) <= 4e-16 * want
+
+private dense(xs: []real) -> VectorView[real] = VectorView.of(xs).unwrap()
+
+private reals(n: usize, f: (usize) -> real) -> Buf[real]
+    var b: Buf[real] = buf()
+
+    for i in 0..<n do b.push(f(i))
+    b
+
+// -- dot ---------------------------------------------------------------------------------------------
+
+@test
+dot_of_two_dense_vectors()
+    var x = [1.0, 2.0, 3.0]
+    var y = [4.0, 5.0, 6.0]
+
+    assert_eq(dot(dense(x[..]), dense(y[..])).unwrap(), 32.0, "1·4 + 2·5 + 3·6")
+
+@test
+dot_at_f32()
+    var x: [3]f32 = [1.0, 2.0, 3.0]
+    var y: [3]f32 = [4.0, 5.0, 6.0]
+
+    assert_eq(dot(VectorView.of(x[..]).unwrap(), VectorView.of(y[..]).unwrap()).unwrap(), 32.0, "sdot")
+
+@test
+dot_reads_every_second_element_at_increment_two()
+    var x = [1.0, 99.0, 2.0, 99.0, 3.0]
+    var y = [4.0, 5.0, 6.0]
+
+    assert_eq(dot(VectorView.strided(x[..], 3, 2).unwrap(), dense(y[..])).unwrap(), 32.0, "the 99s are skipped")
+
+// The reference BLAS rule: a negative increment runs the vector backwards from the far end, so the
+// view over [1, 2, 3] at -1 is (3, 2, 1) — and at -2 over [1, _, 2, _, 3] the same vector.
+@test
+dot_runs_a_negative_increment_backwards()
+    var x = [1.0, 2.0, 3.0]
+    var w = [1.0, 99.0, 2.0, 99.0, 3.0]
+    var y = [4.0, 5.0, 6.0]
+
+    assert_eq(dot(VectorView.strided(x[..], 3, -1).unwrap(), dense(y[..])).unwrap(), 28.0, "3·4 + 2·5 + 1·6")
+    assert_eq(dot(VectorView.strided(w[..], 3, -2).unwrap(), dense(y[..])).unwrap(), 28.0, "the same at -2")
+
+    // Both reversed is the forward product again.
+    assert_eq(dot(VectorView.strided(x[..], 3, -1).unwrap(), VectorView.strided(y[..], 3, -1).unwrap()).unwrap(), 32.0, "both reversed")
+
+@test
+the_view_element_rule_matches_what_blas_reads()
+    var w = [1.0, 99.0, 2.0, 99.0, 3.0]
+    val v = VectorView.strided(w[..], 3, -2).unwrap()
+
+    assert(v.at(0) == 3.0 && v.at(1) == 2.0 && v.at(2) == 1.0, "element 0 is the far end")
+
+@test
+dot_of_complex_vectors_does_not_conjugate_and_dotc_does()
+    var x = [Complex(1.0, 2.0), Complex(3.0, -1.0)]
+    var y = [Complex(2.0, 0.0), Complex(0.0, 1.0)]
+    val vx = VectorView.of(x[..]).unwrap()
+    val vy = VectorView.of(y[..]).unwrap()
+
+    // (1+2i)·2 + (3−i)·i = 2+4i + 3i+1
+    assert_eq(dot(vx, vy).unwrap(), Complex(3.0, 7.0), "zdotu")
+    // (1−2i)·2 + (3+i)·i = 2−4i + 3i−1
+    assert_eq(dotc(vx, vy).unwrap(), Complex(1.0, -1.0), "zdotc")
+
+@test
+dot_of_complex_f32_vectors()
+    var x: [2]Complex[f32] = [Complex(1.0, 2.0), Complex(3.0, -1.0)]
+    var y: [2]Complex[f32] = [Complex(2.0, 0.0), Complex(0.0, 1.0)]
+    val vx = VectorView.of(x[..]).unwrap()
+    val vy = VectorView.of(y[..]).unwrap()
+
+    assert_eq(dot(vx, vy).unwrap(), Complex(3.0, 7.0), "cdotu")
+    assert_eq(dotc(vx, vy).unwrap(), Complex(1.0, -1.0), "cdotc")
+
+@test
+dot_refuses_vectors_of_different_lengths()
+    var x = [1.0, 2.0, 3.0]
+    var y = [4.0, 5.0]
+
+    assert(fails_with(dot(dense(x[..]), dense(y[..])), ShapeMismatch), "3 against 2")
+    assert(fails_with(dotc(dense(x[..]), dense(y[..])), ShapeMismatch), "dotc too")
+
+@test
+dot_of_empty_vectors_is_zero()
+    var x: [0]real = []
+
+    assert_eq(dot(dense(x[..]), dense(x[..])).unwrap(), 0.0, "an empty sum")
+
+// -- axpy, scal, nrm2, asum --------------------------------------------------------------------------
+
+@test
+axpy_adds_a_multiple_into_y_in_y_order()
+    var x = [1.0, 2.0, 3.0]
+    var y = [10.0, 20.0, 30.0]
+
+    // y at -1 is (30, 20, 10); adding 2·(1, 2, 3) gives (32, 24, 16), stored back to front.
+    axpy(2.0, dense(x[..]), VectorView.strided(y[..], 3, -1).unwrap()).unwrap()
+    assert(y[0] == 16.0 && y[1] == 24.0 && y[2] == 32.0, s"got ${y[0]}, ${y[1]}, ${y[2]}")
+
+@test
+axpy_of_complex_multiplies_by_a_complex_scalar()
+    var x = [Complex(1.0, 0.0), Complex(0.0, 1.0)]
+    var y = [Complex(0.0, 0.0), Complex(5.0, 0.0)]
+
+    axpy(Complex(0.0, 1.0), VectorView.of(x[..]).unwrap(), VectorView.of(y[..]).unwrap()).unwrap()
+    assert_eq(y[0], Complex(0.0, 1.0), "i·1")
+    assert_eq(y[1], Complex(4.0, 0.0), "5 + i·i")
+
+@test
+axpy_refuses_vectors_of_different_lengths()
+    var x = [1.0, 2.0]
+    var y = [1.0, 2.0, 3.0]
+
+    assert(fails_with(axpy(1.0, dense(x[..]), dense(y[..])), ShapeMismatch), "2 into 3")
+    assert(y[0] == 1.0 && y[2] == 3.0, "y untouched")
+
+@test
+scal_scales_only_the_elements_of_the_view()
+    var x = [1.0, 7.0, 2.0, 7.0, 3.0]
+
+    scal(3.0, VectorView.strided(x[..], 3, 2).unwrap())
+    assert(x[0] == 3.0 && x[2] == 6.0 && x[4] == 9.0, "the view's elements")
+    assert(x[1] == 7.0 && x[3] == 7.0, "the gaps are not touched")
+
+@test
+scal_at_a_negative_increment_scales_the_same_elements()
+    var x = [1.0, 7.0, 2.0, 7.0, 3.0]
+
+    scal(-1.0, VectorView.strided(x[..], 3, -2).unwrap())
+    assert(x[0] == -1.0 && x[2] == -2.0 && x[4] == -3.0 && x[1] == 7.0, "reversed view, same elements")
+
+@test
+scal_of_complex_by_i_rotates()
+    var x = [Complex(1.0, 2.0)]
+
+    scal(Complex(0.0, 1.0), VectorView.of(x[..]).unwrap())
+    assert_eq(x[0], Complex(-2.0, 1.0), "i·(1+2i)")
+
+@test
+nrm2_and_asum_answer_at_the_real_width()
+    var x = [3.0, -4.0]
+    var z = [Complex(3.0, 4.0), Complex(-1.0, 2.0)]
+    var s: [2]Complex[f32] = [Complex(3.0, 4.0), Complex(0.0, 0.0)]
+    var w = [3.0, 99.0, -4.0]
+
+    assert_eq(nrm2(dense(x[..])), 5.0, "3-4-5")
+    assert_eq(asum(dense(x[..])), 7.0, "|3| + |-4|")
+    assert_eq(nrm2(VectorView.strided(w[..], 2, 2).unwrap()), 5.0, "strided")
+    assert_eq(nrm2(VectorView.strided(w[..], 2, -2).unwrap()), 5.0, "reversed")
+    assert_eq(asum(VectorView.strided(w[..], 2, -2).unwrap()), 7.0, "reversed asum")
+
+    // BLAS's complex asum is Σ |re| + |im|, not the modulus: 3+4 + 1+2.
+    assert_eq(asum(VectorView.of(z[..]).unwrap()), 10.0, "dzasum")
+    assert(near(nrm2(VectorView.of(z[..]).unwrap()), 5.477225575051661), "dznrm2: √(9+16+1+4)")
+
+    val n: f32 = nrm2(VectorView.of(s[..]).unwrap())
+
+    assert_eq(n, 5.0, "scnrm2 answers f32")
+
+// -- gemv --------------------------------------------------------------------------------------------
+
+// A = [[1, 3, 5], [2, 4, 6]], column-major.
+private a23() -> Buf[real] = reals(6, i -> real(i + 1))
+
+@test
+gemv_multiplies_by_a_matrix()
+    var a = a23()
+    var x = [1.0, 1.0, 1.0]
+    var y = [0.0, 0.0]
+    val m = MatrixView.of(a.view(), 2, 3).unwrap()
+
+    gemv(NoTrans, 1.0, m, dense(x[..]), 0.0, dense(y[..])).unwrap()
+    assert(y[0] == 9.0 && y[1] == 12.0, s"A·1: got ${y[0]}, ${y[1]}")
+
+@test
+gemv_transposed_and_with_alpha_and_beta()
+    var a = a23()
+    var x = [1.0, 1.0]
+    var y = [1.0, 1.0, 1.0]
+    val m = MatrixView.of(a.view(), 2, 3).unwrap()
+
+    // Aᵀ·1 = (3, 7, 11); 2·that + 3·1.
+    gemv(Trans, 2.0, m, dense(x[..]), 3.0, dense(y[..])).unwrap()
+    assert(y[0] == 9.0 && y[1] == 17.0 && y[2] == 25.0, s"got ${y[0]}, ${y[1]}, ${y[2]}")
+
+@test
+gemv_with_strided_vectors()
+    var a = a23()
+    var x = [1.0, 0.0, 2.0, 0.0, 3.0]
+    var y = [0.0, 50.0, 0.0]
+    val m = MatrixView.of(a.view(), 2, 3).unwrap()
+
+    // x at 2 is (1, 2, 3); y at -2 writes element 0 to y[2]. A·x = (22, 28).
+    gemv(NoTrans, 1.0, m, VectorView.strided(x[..], 3, 2).unwrap(), 0.0, VectorView.strided(y[..], 2, -2).unwrap()).unwrap()
+    assert(y[2] == 22.0 && y[0] == 28.0 && y[1] == 50.0, s"got ${y[0]}, ${y[1]}, ${y[2]}")
+
+@test
+gemv_conjugate_transposed_differs_from_transposed()
+    var a = [Complex(0.0, 1.0), Complex(1.0, 0.0)]
+    var x = [Complex(1.0, 0.0), Complex(1.0, 0.0)]
+    var y = [Complex(0.0, 0.0)]
+    val m = MatrixView.of(a[..], 2, 1).unwrap()
+    val one = Complex(1.0, 0.0)
+    val zero = Complex(0.0, 0.0)
+
+    gemv(Trans, one, m, VectorView.of(x[..]).unwrap(), zero, VectorView.of(y[..]).unwrap()).unwrap()
+    assert_eq(y[0], Complex(1.0, 1.0), "Aᵀ·x = i + 1")
+
+    gemv(ConjTrans, one, m, VectorView.of(x[..]).unwrap(), zero, VectorView.of(y[..]).unwrap()).unwrap()
+    assert_eq(y[0], Complex(1.0, -1.0), "Aᴴ·x = −i + 1")
+
+@test
+gemv_conj_trans_of_a_real_matrix_is_its_transpose()
+    var a = a23()
+    var x = [1.0, 1.0]
+    var y = [0.0, 0.0, 0.0]
+    val m = MatrixView.of(a.view(), 2, 3).unwrap()
+
+    gemv(ConjTrans, 1.0, m, dense(x[..]), 0.0, dense(y[..])).unwrap()
+    assert(y[0] == 3.0 && y[1] == 7.0 && y[2] == 11.0, "Aᴴ = Aᵀ for a real A")
+
+@test
+gemv_refuses_mismatched_shapes()
+    var a = a23()
+    var x2 = [1.0, 1.0]
+    var x3 = [1.0, 1.0, 1.0]
+    var y2 = [0.0, 0.0]
+    var y3 = [0.0, 0.0, 0.0]
+    val m = MatrixView.of(a.view(), 2, 3).unwrap()
+
+    assert(fails_with(gemv(NoTrans, 1.0, m, dense(x2[..]), 0.0, dense(y2[..])), ShapeMismatch), "x has 2, A has 3 columns")
+    assert(fails_with(gemv(NoTrans, 1.0, m, dense(x3[..]), 0.0, dense(y3[..])), ShapeMismatch), "y has 3, A has 2 rows")
+    assert(fails_with(gemv(Trans, 1.0, m, dense(x3[..]), 0.0, dense(y2[..])), ShapeMismatch), "Aᵀ is 3 × 2")
+    assert(y2[0] == 0.0 && y3[0] == 0.0, "nothing written")
+
+@test
+gemv_against_numpy()
+    var a = reals(63, k -> real((7 * (k % 9) + 3 * (k / 9)) % 13) / 8.0 - 0.75)
+    var x = reals(7, i -> real((3 * i) % 7) / 2.0 - 1.5)
+    var y = reals(9, _ -> 0.0)
+    val want = [2.125, -1.125, 0.5, -1.9375, 0.5, -1.9375, 0.5, -1.9375, 1.3125]
+
+    gemv(NoTrans, 1.0, MatrixView.of(a.view(), 9, 7).unwrap(), dense(x.view()), 0.0, dense(y.view())).unwrap()
+
+    for i in 0..<9
+        assert_eq(y[i], want[i], s"row $i")
+
+    assert(near(nrm2(MatrixView.of(a.view(), 9, 7).unwrap().col(0)), 1.3693063937629153), "nrm2 of column 0")
+
+// -- gemm --------------------------------------------------------------------------------------------
+
+@test
+gemm_multiplies_two_matrices()
+    var a = a23()
+    var b = reals(6, i -> real(i + 1))
+    var cm = reals(4, _ -> 0.0)
+
+    // [[1,3,5],[2,4,6]] · [[1,4],[2,5],[3,6]] = [[22, 49], [28, 64]]
+    gemm(NoTrans, NoTrans, 1.0, MatrixView.of(a.view(), 2, 3).unwrap(), MatrixView.of(b.view(), 3, 2).unwrap(), 0.0, MatrixView.of(cm.view(), 2, 2).unwrap()).unwrap()
+    assert(cm[0] == 22.0 && cm[1] == 28.0 && cm[2] == 49.0 && cm[3] == 64.0, s"got ${cm[0]} ${cm[1]} ${cm[2]} ${cm[3]}")
+
+@test
+gemm_with_alpha_and_beta()
+    var a = a23()
+    var b = reals(6, i -> real(i + 1))
+    var cm = reals(4, _ -> 1.0)
+
+    gemm(NoTrans, NoTrans, 0.5, MatrixView.of(a.view(), 2, 3).unwrap(), MatrixView.of(b.view(), 3, 2).unwrap(), -2.0, MatrixView.of(cm.view(), 2, 2).unwrap()).unwrap()
+    assert(cm[0] == 9.0 && cm[1] == 12.0 && cm[2] == 22.5 && cm[3] == 30.0, s"got ${cm[0]} ${cm[1]} ${cm[2]} ${cm[3]}")
+
+@test
+a_times_the_identity_is_a()
+    var a = reals(12, k -> real(k * k) - 5.0)
+    var id = reals(16, k -> if k % 5 == 0 then 1.0 else 0.0)
+    var left = reals(9, k -> if k % 4 == 0 then 1.0 else 0.0)
+    var cm = reals(12, _ -> 0.0)
+    val m = MatrixView.of(a.view(), 3, 4).unwrap()
+
+    gemm(NoTrans, NoTrans, 1.0, m, MatrixView.of(id.view(), 4, 4).unwrap(), 0.0, MatrixView.of(cm.view(), 3, 4).unwrap()).unwrap()
+    for k in 0..<12 do assert_eq(cm[k], a[k], s"A·I element $k")
+
+    gemm(NoTrans, NoTrans, 1.0, MatrixView.of(left.view(), 3, 3).unwrap(), m, 0.0, MatrixView.of(cm.view(), 3, 4).unwrap()).unwrap()
+    for k in 0..<12 do assert_eq(cm[k], a[k], s"I·A element $k")
+
+// Every pair of flags against one product, each side computed by a different call: (AB)ᵀ = BᵀAᵀ,
+// and op(X) of a matrix stored transposed is the matrix itself.
+@test
+every_transpose_flag_pair_agrees_with_the_plain_product()
+    var a = reals(12, k -> real((5 * k) % 7) - 3.0)        // 3 × 4
+    var at = reals(12, k -> a[(k % 4) * 3 + k / 4])         // 4 × 3, its transpose
+    var b = reals(8, k -> real((3 * k) % 5) - 2.0)          // 4 × 2
+    var bt = reals(8, k -> b[(k % 2) * 4 + k / 2])          // 2 × 4
+    var want = reals(6, _ -> 0.0)
+    var got = reals(6, _ -> 0.0)
+    var gotT = reals(6, _ -> 0.0)
+
+    gemm(NoTrans, NoTrans, 1.0, MatrixView.of(a.view(), 3, 4).unwrap(), MatrixView.of(b.view(), 4, 2).unwrap(), 0.0, MatrixView.of(want.view(), 3, 2).unwrap()).unwrap()
+
+    for (oa, sa) in [(NoTrans, 0), (Trans, 1), (ConjTrans, 1)]
+        for (ob, sb) in [(NoTrans, 0), (Trans, 1), (ConjTrans, 1)]
+            val va = if sa == 0 then MatrixView.of(a.view(), 3, 4).unwrap() else MatrixView.of(at.view(), 4, 3).unwrap()
+            val vb = if sb == 0 then MatrixView.of(b.view(), 4, 2).unwrap() else MatrixView.of(bt.view(), 2, 4).unwrap()
+
+            gemm(oa, ob, 1.0, va, vb, 0.0, MatrixView.of(got.view(), 3, 2).unwrap()).unwrap()
+            for k in 0..<6 do assert_eq(got[k], want[k], s"op(A)·op(B) element $k")
+
+            // Bᵀ·Aᵀ through the opposite flags, written 2 × 3: the transpose of the product.
+            val ra = if sa == 0 then Trans else NoTrans
+            val rb = if sb == 0 then Trans else NoTrans
+
+            gemm(rb, ra, 1.0, vb, va, 0.0, MatrixView.of(gotT.view(), 2, 3).unwrap()).unwrap()
+            for i in 0..<3
+                for j in 0..<2 do assert_eq(gotT[i * 2 + j], want[j * 3 + i], s"(AB)ᵀ at ($j, $i)")
+
+@test
+gemm_against_numpy()
+    var a = reals(63, k -> real((7 * (k % 9) + 3 * (k / 9)) % 13) / 8.0 - 0.75)
+    var b = reals(56, k -> real((5 * (k % 7) + 11 * (k / 7)) % 17) / 4.0 - 2.0)
+    var cm = reals(72, _ -> 0.0)
+    val want = [1.34375, -0.71875, 3.3125, -2.8125, 3.25, -2.875, 3.1875, -1.71875, 0.28125, 0.6875, 1.0, -1.53125, 1.625, -1.3125, 1.84375, -1.09375, -1.1875, -1.28125, -0.5, -1.53125, -0.53125, 1.28125, -0.5625, 1.25, -0.59375, 0.40625, 1.40625, -1.6875, -0.34375, 1.0, -1.71875, 1.25, -1.46875, 1.5, 0.40625, -0.6875, 0.84375, 0.84375, -1.1875, 1.65625, -1.1875, 1.65625, -1.1875, -1.1875, -1.1875, -0.34375, -1.6875, -0.1875, 1.3125, -0.4375, 1.0625, -0.6875, 0.40625, 1.5, -1.53125, -0.5, 1.34375, -1.6875, 1.375, -1.65625, 1.40625, 0.40625, -0.59375, 1.0, 0.6875, -0.84375, 1.6875, -1.0625, 1.46875, -1.28125, -1.1875, -1.09375]
+
+    gemm(NoTrans, NoTrans, 1.0, MatrixView.of(a.view(), 9, 7).unwrap(), MatrixView.of(b.view(), 7, 8).unwrap(), 0.0, MatrixView.of(cm.view(), 9, 8).unwrap()).unwrap()
+    for k in 0..<72 do assert_eq(cm[k], want[k], s"element $k")
+
+// Integer-valued complex operands; numpy's Aᴴ·B and Aᵀ·B for A 3 × 4 and B 3 × 5.
+@test
+complex_gemm_conj_trans_and_trans_against_numpy()
+    var a: Buf[Complex[real]] = buf()
+    var b: Buf[Complex[real]] = buf()
+    var cm: Buf[Complex[real]] = buf()
+
+    for j in 0..<4
+        for i in 0..<3 do a.push(Complex(real((2 * i + j) % 5) - 2.0, real((i + 3 * j) % 4) - 1.0))
+    for j in 0..<5
+        for i in 0..<3 do b.push(Complex(real((i + 2 * j) % 3) - 1.0, real((3 * i + j) % 5) - 2.0))
+    for _ in 0..<20 do cm.push(Complex.zero())
+
+    val one = Complex(1.0, 0.0)
+    val va = MatrixView.of(a.view(), 3, 4).unwrap()
+    val vb = MatrixView.of(b.view(), 3, 5).unwrap()
+    val vc = MatrixView.of(cm.view(), 4, 5).unwrap()
+    val herm = [(5, 0), (-6, 7), (0, 5), (-2, -6), (-1, 3), (-6, 0), (1, 5), (5, -4), (-1, 3), (5, -3), (-2, -8), (-2, 5), (5, 0), (2, -4), (-4, -2), (2, 1), (-6, -7), (2, -1), (2, 3), (-1, 3)]
+    val plain = [(3, 4), (4, 3), (-2, 1), (0, -2), (-3, 1), (2, 6), (-5, 3), (1, -6), (-3, 1), (1, -5), (8, -2), (-2, 3), (3, 4), (-4, -8), (2, -6), (-4, 5), (2, -9), (-6, 5), (-6, 1), (7, 1)]
+
+    gemm(ConjTrans, NoTrans, one, va, vb, Complex.zero(), vc).unwrap()
+    for k in 0..<20 do assert_eq(cm[k], Complex(real(herm[k].0), real(herm[k].1)), s"Aᴴ·B element $k")
+
+    gemm(Trans, NoTrans, one, va, vb, Complex.zero(), vc).unwrap()
+    for k in 0..<20 do assert_eq(cm[k], Complex(real(plain[k].0), real(plain[k].1)), s"Aᵀ·B element $k")
+
+@test
+gemm_at_f32()
+    var a: [6]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    var cm: [4]f32 = [0.0, 0.0, 0.0, 0.0]
+    val m = MatrixView.of(a[..], 2, 3).unwrap()
+
+    // A·Aᵀ = [[35, 44], [44, 56]]
+    gemm(NoTrans, Trans, 1.0, m, m, 0.0, MatrixView.of(cm[..], 2, 2).unwrap()).unwrap()
+    assert(cm[0] == 35.0 && cm[1] == 44.0 && cm[2] == 44.0 && cm[3] == 56.0, "sgemm A·Aᵀ")
+
+@test
+gemm_refuses_mismatched_shapes()
+    var a = a23()
+    var cm = reals(9, _ -> 7.0)
+    val m = MatrixView.of(a.view(), 2, 3).unwrap()
+
+    assert(fails_with(gemm(NoTrans, NoTrans, 1.0, m, m, 0.0, MatrixView.of(cm.view(), 2, 3).unwrap()), ShapeMismatch), "2×3 · 2×3")
+    assert(fails_with(gemm(NoTrans, Trans, 1.0, m, m, 0.0, MatrixView.of(cm.view(), 3, 3).unwrap()), ShapeMismatch), "C must be 2×2")
+    assert(fails_with(gemm(Trans, NoTrans, 1.0, m, m, 0.0, MatrixView.of(cm.view(), 2, 2).unwrap()), ShapeMismatch), "Aᵀ·A is 3×3")
+    assert(cm[0] == 7.0, "C untouched")
+
+// The shape nex's compiler gives `x @ conj(transpose(Y))`: `gemm` with `x` as a 1 × k matrix whose
+// leading dimension is 1.
+@test
+gemm_with_a_vector_as_one_row()
+    var x = [Complex(1.0, 1.0), Complex(2.0, 0.0)]
+    var y = [Complex(0.0, 1.0), Complex(1.0, 0.0), Complex(1.0, 0.0), Complex(0.0, 2.0)]    // 2 × 2
+    var out = [Complex(0.0, 0.0), Complex(0.0, 0.0)]
+
+    gemm(NoTrans, ConjTrans, Complex(1.0, 0.0), MatrixView.of(x[..], 1, 2).unwrap(), MatrixView.of(y[..], 2, 2).unwrap(), Complex.zero(), MatrixView.of(out[..], 1, 2).unwrap()).unwrap()
+    // out_j = Σ_k x_k · conj(Y[j, k]): j=0: (1+i)(−i) + 2·1 = 3 − i; j=1: (1+i)·1 + 2·(−2i) = 1 − 3i
+    assert_eq(out[0], Complex(3.0, -1.0), "column 0")
+    assert_eq(out[1], Complex(1.0, -3.0), "column 1")
+
+// -- views -------------------------------------------------------------------------------------------
+
+// A sub-block keeps its parent's leading dimension, so BLAS reads and writes it in place and the
+// elements around it are untouched.
+@test
+gemm_reads_and_writes_sub_blocks_in_place()
+    var big = reals(20, k -> real(k))                       // 4 × 5, ld 4
+    var out = reals(30, _ -> -1.0)                          // 5 × 6, ld 5
+    val a = MatrixView.of(big.view(), 4, 5).unwrap().block(1, 1, 2, 3).unwrap()    // rows 1–2, cols 1–3
+    val b = MatrixView.of(big.view(), 4, 5).unwrap().block(0, 2, 3, 2).unwrap()    // rows 0–2, cols 2–3
+    val c = MatrixView.of(out.view(), 5, 6).unwrap().block(2, 3, 2, 2).unwrap()
+
+    assert_eq(a.ld, 4, "the block keeps ld")
+    assert_eq(a.at(0, 0), 5.0, "big(1, 1)")
+
+    gemm(NoTrans, NoTrans, 1.0, a, b, 0.0, c).unwrap()
+
+    // a = [[5, 9, 13], [6, 10, 14]], b = [[8, 12], [9, 13], [10, 14]]
+    assert_eq(out[3 * 5 + 2], 5.0 * 8.0 + 9.0 * 9.0 + 13.0 * 10.0, "c(0, 0)")
+    assert_eq(out[3 * 5 + 3], 6.0 * 8.0 + 10.0 * 9.0 + 14.0 * 10.0, "c(1, 0)")
+    assert_eq(out[4 * 5 + 2], 5.0 * 12.0 + 9.0 * 13.0 + 13.0 * 14.0, "c(0, 1)")
+    assert_eq(out[4 * 5 + 3], 6.0 * 12.0 + 10.0 * 13.0 + 14.0 * 14.0, "c(1, 1)")
+
+    var touched = 0
+
+    for k in 0..<30
+        if out[k] != -1.0 then touched += 1
+
+    assert_eq(touched, 4, "only the block is written")
+
+@test
+a_row_is_a_vector_at_the_leading_dimension()
+    var a = reals(12, k -> real(k))         // 3 × 4
+    var x = [1.0, 1.0, 1.0, 1.0]
+    val m = MatrixView.of(a.view(), 3, 4).unwrap()
+
+    // row 1 is (1, 4, 7, 10)
+    assert_eq(dot(m.row(1), dense(x[..])).unwrap(), 22.0, "row 1")
+    assert_eq(dot(m.col(2), dense(x[..<3])).unwrap(), 6.0 + 7.0 + 8.0, "column 2")
+
+@test
+a_view_that_reaches_past_its_storage_is_refused()
+    var xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+
+    assert(fails_with(VectorView.strided(xs[..], 3, 3), OutOfStorage), "elements 0, 3, 6 of 5")
+    assert(fails_with(VectorView.strided(xs[..], 3, -3), OutOfStorage), "reversed too")
+    assert(VectorView.strided(xs[..], 3, 2).is_ok(), "0, 2, 4 fits exactly")
+    assert(fails_with(VectorView.strided(xs[..<4], 3, 2), OutOfStorage), "0, 2, 4 of 4: one past the end")
+    assert(VectorView.strided(xs[..], 0, 9).is_ok(), "an empty view fits anything")
+    assert(fails_with(VectorView.strided(xs[..], 2, 0), ZeroIncrement), "increment zero")
+    assert(fails_with(MatrixView.of(xs[..], 2, 3), OutOfStorage), "6 elements of 5")
+    assert(fails_with(MatrixView.strided(xs[..], 2, 2, 4), OutOfStorage), "(2-1)·4 + 2 = 6")
+    assert(MatrixView.strided(xs[..], 1, 2, 4).is_ok(), "(2-1)·4 + 1 = 5")
+    assert(fails_with(MatrixView.strided(xs[..], 2, 2, 1), LeadingDimension), "ld below rows")
+    assert(fails_with(MatrixView.strided(xs[..], 0, 2, 0), LeadingDimension), "ld zero")
+    assert(MatrixView.of(xs[..], 0, 3).is_ok(), "an empty matrix gets ld 1")
+
+@test
+a_block_past_its_parent_is_refused()
+    var xs = reals(12, k -> real(k))
+    val m = MatrixView.of(xs.view(), 3, 4).unwrap()
+
+    assert(fails_with(m.block(2, 0, 2, 1), OutOfStorage), "rows 2–3 of 3")
+    assert(fails_with(m.block(0, 3, 1, 2), OutOfStorage), "cols 3–4 of 4")
+    assert(m.block(3, 4, 0, 0).is_ok(), "an empty block at the far corner")
+
+@test
+an_extent_past_32_bits_is_refused()
+    var xs = [1.0]
+    val p = VectorView.of(xs[..]).unwrap().ptr
+
+    assert(fails_with(VectorView.from_ptr(p, 2147483648, 1), TooLarge), "2³¹ elements")
+    assert(fails_with(VectorView.from_ptr(p, 2, -2147483648), TooLarge), "|inc| = 2³¹")
+    assert(VectorView.from_ptr(p, 2147483647, 1).is_ok(), "2³¹ − 1 is CBLAS's largest")
+    assert(fails_with(MatrixView.from_ptr(p, 1, 2147483648, 1), TooLarge), "2³¹ columns")
+    assert(fails_with(MatrixView.from_ptr(p, 1, 1, 2147483648), TooLarge), "ld 2³¹")
+
+@test
+the_errors_render()
+    assert_eq(s"${ShapeMismatch}", "the extents of the operands do not agree", "ShapeMismatch")
+    assert_eq(s"${TooLarge}", "an extent does not fit a 32-bit int", "TooLarge")
