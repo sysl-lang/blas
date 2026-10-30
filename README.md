@@ -31,7 +31,7 @@ main() -> Result[unit, BlasError]
 
 ```
 dependencies {
-  blas { git = "github.com/sysl-lang/blas", version = "0.1.0" }
+  blas { git = "github.com/sysl-lang/blas", version = "0.1.1" }
 }
 ```
 
