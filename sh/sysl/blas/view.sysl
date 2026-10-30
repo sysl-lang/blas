@@ -48,18 +48,30 @@ private fits(n: usize) -> bool = n <= I32_MAX
 // Widened first: `int`'s most negative value has no positive twin.
 private magnitude(inc: int) -> usize = usize(if inc < 0 then -i64(inc) else i64(inc))
 
+// The elements a vector of `len` elements `|inc|` apart spans, and a `rows` × `cols` matrix with
+// columns `ld` apart.
+private vector_extent(len: usize, inc: int) -> usize = if len == 0 then 0 else (len - 1) * magnitude(inc) + 1
+
+private matrix_extent(rows: usize, cols: usize, ld: usize) -> usize = if rows == 0 || cols == 0 then 0 else (cols - 1) * ld + rows
+
 /** A strided vector over storage it does not own: `len` elements, `inc` apart.
  *
- * **The increment follows the reference BLAS rule, negative included.** `ptr` is the element at the
- * lowest address. With `inc > 0` element `i` is at `ptr + i·inc`; with `inc < 0` the vector runs
- * backwards, element `i` at `ptr + (len − 1 − i)·|inc|` — so a view with `inc = -1` over `[1, 2, 3]`
+ * **`data` is exactly the elements the view spans**, from the lowest-addressed one, so every element
+ * the view reaches is a checked index of it. Made from a slice (`of`, `strided`), it is a slice of
+ * that slice and keeps the same backing alive — a `Buf`'s storage, an array a function answered — as
+ * long as the view is held. Made from a pointer (`from_ptr`), it is a view of storage nothing here
+ * owns, which must outlive it.
+ *
+ * **The increment follows the reference BLAS rule, negative included.** `data[0]` is the element at
+ * the lowest address. With `inc > 0` element `i` is `data[i·inc]`; with `inc < 0` the vector runs
+ * backwards, element `i` at `data[(len − 1 − i)·|inc|]` — so a view with `inc = -1` over `[1, 2, 3]`
  * is the vector `(3, 2, 1)`, which is what every routine of this module and of the raw layer reads.
  *
- * The storage must outlive the view and is written through it by the routines that write a vector
- * (`axpy`, `scal`, `gemv`).
+ * The storage is written through the view by the routines that write a vector (`axpy`, `scal`,
+ * `gemv`).
  */
 struct VectorView[T]
-    ptr: *T
+    data: []T
     len: usize
     inc: int
 
@@ -67,7 +79,7 @@ struct VectorView[T]
     of(xs: []T) -> Result[VectorView[T], BlasError]
         if !fits(xs.len) then return Err(TooLarge)
 
-        Ok(VectorView(as_mut_ptr(xs), xs.len, 1))
+        Ok(VectorView(xs, xs.len, 1))
 
     /** `len` elements of `xs`, `inc` apart, checked against the storage: the view's farthest element
      * must lie inside `xs`.
@@ -75,19 +87,25 @@ struct VectorView[T]
     strided(xs: []T, len: usize, inc: int) -> Result[VectorView[T], BlasError]
         if inc == 0 then return Err(ZeroIncrement)
         if !fits(len) || !fits(magnitude(inc)) then return Err(TooLarge)
-        if len > 0 && (len - 1) * magnitude(inc) >= xs.len then return Err(OutOfStorage)
 
-        Ok(VectorView(as_mut_ptr(xs), len, inc))
+        val need = vector_extent(len, inc)
+
+        if need > xs.len then return Err(OutOfStorage)
+
+        Ok(VectorView(xs[..<need], len, inc))
 
     /** A view over storage the caller vouches for — the address of the lowest element, as BLAS takes
      * it. This is how an array that is not a sysl slice (nex's, a C library's) reaches BLAS without a
-     * copy; only the increment and the 32-bit range are checked.
+     * copy; only the increment and the 32-bit range are checked, and nothing is kept alive.
      */
     from_ptr(p: *T, len: usize, inc: int) -> Result[VectorView[T], BlasError]
         if inc == 0 then return Err(ZeroIncrement)
         if !fits(len) || !fits(magnitude(inc)) then return Err(TooLarge)
 
-        Ok(VectorView(p, len, inc))
+        Ok(VectorView(p[0..<vector_extent(len, inc)], len, inc))
+
+    /** The address of the lowest-addressed element, which is what BLAS is handed. */
+    ptr(self) -> *T = as_mut_ptr(self.data)
 
     /** Where element `i` lies, by the reference BLAS rule above. */
     @track_caller
@@ -96,7 +114,7 @@ struct VectorView[T]
 
         val k = if self.inc > 0 then i * magnitude(self.inc) else (self.len - 1 - i) * magnitude(self.inc)
 
-        &self.ptr[k]
+        &self.data[k]
 
     @track_caller
     at(self, i: usize) -> T = self.place(i)[0]
@@ -106,13 +124,21 @@ struct VectorView[T]
         self.place(i)[0] = v
 
 /** A column-major matrix over storage it does not own: `rows` by `cols`, column `j` starting `ld`
- * elements after column `j − 1` — Fortran's and BLAS's layout, element `(i, j)` at `ptr + i + j·ld`.
+ * elements after column `j − 1` — Fortran's, BLAS's and LAPACK's layout, element `(i, j)` at
+ * `data[i + j·ld]`.
  *
- * A **sub-block** (`block`) keeps the parent's `ld`, so it is a matrix BLAS reads in place, which is
- * what `lda`, `ldb` and `ldc` exist for. `ld` is at least `rows` and at least one, as BLAS requires.
+ * **`data` is exactly the elements the matrix spans**, `ld·(cols − 1) + rows` of them, so every
+ * element is a checked index of it. Made from a slice (`of`, `strided`) it keeps that slice's backing
+ * alive — which is how a matrix a function answers over fresh storage stays valid for as long as it
+ * is held. Made from a pointer (`from_ptr`) it is a view of storage nothing here owns — a C array, an
+ * interpreter's buffer — reached where it lies, with no copy.
+ *
+ * A **sub-block** (`block`) keeps the parent's `ld`, so it is a matrix BLAS and LAPACK read in place,
+ * which is what `lda`, `ldb` and `ldc` exist for. `ld` is at least `rows` and at least one, as BLAS
+ * requires.
  */
 struct MatrixView[T]
-    ptr: *T
+    data: []T
     rows: usize
     cols: usize
     ld: usize
@@ -123,21 +149,25 @@ struct MatrixView[T]
 
     /** `xs` as a `rows` × `cols` matrix whose columns are `ld` apart, checked against the storage. */
     strided(xs: []T, rows: usize, cols: usize, ld: usize) -> Result[MatrixView[T], BlasError]
-        val m = MatrixView.from_ptr(as_mut_ptr(xs), rows, cols, ld)?
+        check_shape(rows, cols, ld)?
 
-        if rows > 0 && cols > 0 && (cols - 1) * ld + rows > xs.len then return Err(OutOfStorage)
+        val need = matrix_extent(rows, cols, ld)
 
-        Ok(m)
+        if need > xs.len then return Err(OutOfStorage)
+
+        Ok(MatrixView(xs[..<need], rows, cols, ld))
 
     /** A view over storage the caller vouches for: the address of element `(0, 0)`. This is how an
      * array that is not a sysl slice reaches BLAS without a copy; only the leading dimension and the
-     * 32-bit range are checked.
+     * 32-bit range are checked, and nothing is kept alive.
      */
     from_ptr(p: *T, rows: usize, cols: usize, ld: usize) -> Result[MatrixView[T], BlasError]
-        if !fits(rows) || !fits(cols) || !fits(ld) then return Err(TooLarge)
-        if ld < rows || ld == 0 then return Err(LeadingDimension)
+        check_shape(rows, cols, ld)?
 
-        Ok(MatrixView(p, rows, cols, ld))
+        Ok(MatrixView(p[0..<matrix_extent(rows, cols, ld)], rows, cols, ld))
+
+    /** The address of element `(0, 0)`, which is what BLAS and LAPACK are handed. */
+    ptr(self) -> *T = as_mut_ptr(self.data)
 
     /** The `rows` × `cols` block whose top-left element is `(r, c)`, sharing this view's storage and
      * leading dimension.
@@ -145,29 +175,34 @@ struct MatrixView[T]
     block(self, r: usize, c: usize, rows: usize, cols: usize) -> Result[MatrixView[T], BlasError]
         if r + rows > self.rows || c + cols > self.cols then return Err(OutOfStorage)
 
-        val p = if rows == 0 || cols == 0 then self.ptr else &self.ptr[r + c * self.ld]
+        val need = matrix_extent(rows, cols, self.ld)
+        val first = if need == 0 then 0 else r + c * self.ld
 
-        Ok(MatrixView(p, rows, cols, self.ld))
+        Ok(MatrixView(self.data[first..<first + need], rows, cols, self.ld))
 
     /** Column `j`, a vector at unit stride. */
     @track_caller
     col(self, j: usize) -> VectorView[T]
         require j < self.cols, "column index past the view's columns"
 
-        VectorView(&self.ptr[j * self.ld], self.rows, 1)
+        val first = if self.rows == 0 then 0 else j * self.ld
+
+        VectorView(self.data[first..<first + self.rows], self.rows, 1)
 
     /** Row `i`, a vector whose increment is the leading dimension. */
     @track_caller
     row(self, i: usize) -> VectorView[T]
         require i < self.rows, "row index past the view's rows"
 
-        VectorView(&self.ptr[i], self.cols, int(self.ld))
+        val first = if self.cols == 0 then 0 else i
+
+        VectorView(self.data[first..<first + vector_extent(self.cols, int(self.ld))], self.cols, int(self.ld))
 
     @track_caller
     place(self, i: usize, j: usize) -> *T
         require i < self.rows && j < self.cols, "matrix index past the view's extents"
 
-        &self.ptr[i + j * self.ld]
+        &self.data[i + j * self.ld]
 
     @track_caller
     at(self, i: usize, j: usize) -> T = self.place(i, j)[0]
@@ -175,3 +210,9 @@ struct MatrixView[T]
     @track_caller
     set(self, i: usize, j: usize, v: T)
         self.place(i, j)[0] = v
+
+private check_shape(rows: usize, cols: usize, ld: usize) -> Result[unit, BlasError]
+    if !fits(rows) || !fits(cols) || !fits(ld) then return Err(TooLarge)
+    if ld < rows || ld == 0 then return Err(LeadingDimension)
+
+    Ok(())

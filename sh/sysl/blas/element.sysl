@@ -13,8 +13,8 @@ import sysl.math.complex.Complex
  * calls `dot`, `gemm` and the rest; it names `Element` only in a bound.
  */
 trait Element
-    /** The real type at the same width: what a norm or an absolute sum answers. */
-    type Real
+    /** The real type at the same width: what a norm or an absolute sum answers — `f32` or `real`. */
+    type Real: Width
 
     /** `Σ xᵢ·yᵢ`, unconjugated — `?dot`, or `?dotu_sub` for a complex element. */
     dotu(n: i32, x: *Self, incx: i32, y: *Self, incy: i32) -> Self
@@ -72,14 +72,20 @@ impl Element for real
     gemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: real, a: *real, lda: i32, b: *real, ldb: i32, beta: real, cm: *real, ldc: i32) =
         c.dgemm(c.COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, cm, ldc)
 
-/** A real width that has a complex BLAS: `f32` (`c`) and `real` (`z`).
+/** A real width BLAS has — `f32` or `real` — which is what every element's `Real` is, and the complex
+ * BLAS of that width: `c` for `f32`, `z` for `real`.
  *
  * **A complex element dispatches through its width**, because an `impl` for a generic type covers
- * every instantiation at once: `Complex[F]` is one `Element` for every `F` that is a `ComplexWidth`,
+ * every instantiation at once: `Complex[F]` is one `Element` for every `F` that is a `Width`,
  * and each width says which of the `c` and `z` routines it is. A complex scalar crosses by address,
  * as CBLAS takes it, and a complex dot product comes back through the `_sub` form's out-parameter.
  */
-trait ComplexWidth: Float
+trait Width: Float
+    /** The value widened to `real`. */
+    to_real(self) -> real
+    /** `x` rounded to this width. */
+    of_real64(x: real) -> Self
+
     cdotu(n: i32, x: *Complex[Self], incx: i32, y: *Complex[Self], incy: i32, out: *Complex[Self])
     cdotc(n: i32, x: *Complex[Self], incx: i32, y: *Complex[Self], incy: i32, out: *Complex[Self])
     caxpy(n: i32, alpha: *Complex[Self], x: *Complex[Self], incx: i32, y: *Complex[Self], incy: i32)
@@ -89,7 +95,10 @@ trait ComplexWidth: Float
     cgemv(trans: i32, m: i32, n: i32, alpha: *Complex[Self], a: *Complex[Self], lda: i32, x: *Complex[Self], incx: i32, beta: *Complex[Self], y: *Complex[Self], incy: i32)
     cgemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: *Complex[Self], a: *Complex[Self], lda: i32, b: *Complex[Self], ldb: i32, beta: *Complex[Self], cm: *Complex[Self], ldc: i32)
 
-impl ComplexWidth for f32
+impl Width for f32
+    to_real(self) -> real = real(self)
+    of_real64(x: real) -> f32 = f32(x)
+
     cdotu(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, out: *Complex[f32]) = c.cdotu_sub(n, x, incx, y, incy, out)
     cdotc(n: i32, x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32, out: *Complex[f32]) = c.cdotc_sub(n, x, incx, y, incy, out)
     caxpy(n: i32, alpha: *Complex[f32], x: *Complex[f32], incx: i32, y: *Complex[f32], incy: i32) = c.caxpy(n, alpha, x, incx, y, incy)
@@ -103,7 +112,10 @@ impl ComplexWidth for f32
     cgemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: *Complex[f32], a: *Complex[f32], lda: i32, b: *Complex[f32], ldb: i32, beta: *Complex[f32], cm: *Complex[f32], ldc: i32) =
         c.cgemm(c.COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, cm, ldc)
 
-impl ComplexWidth for real
+impl Width for real
+    to_real(self) -> real = self
+    of_real64(x: real) -> real = x
+
     cdotu(n: i32, x: *Complex[real], incx: i32, y: *Complex[real], incy: i32, out: *Complex[real]) = c.zdotu_sub(n, x, incx, y, incy, out)
     cdotc(n: i32, x: *Complex[real], incx: i32, y: *Complex[real], incy: i32, out: *Complex[real]) = c.zdotc_sub(n, x, incx, y, incy, out)
     caxpy(n: i32, alpha: *Complex[real], x: *Complex[real], incx: i32, y: *Complex[real], incy: i32) = c.zaxpy(n, alpha, x, incx, y, incy)
@@ -117,7 +129,7 @@ impl ComplexWidth for real
     cgemm(ta: i32, tb: i32, m: i32, n: i32, k: i32, alpha: *Complex[real], a: *Complex[real], lda: i32, b: *Complex[real], ldb: i32, beta: *Complex[real], cm: *Complex[real], ldc: i32) =
         c.zgemm(c.COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, cm, ldc)
 
-impl[F: ComplexWidth] Element for Complex[F]
+impl[F: Width] Element for Complex[F]
     type Real = F
 
     dotu(n: i32, x: *Complex[F], incx: i32, y: *Complex[F], incy: i32) -> Complex[F]

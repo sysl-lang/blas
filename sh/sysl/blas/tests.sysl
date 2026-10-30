@@ -3,6 +3,7 @@ module sh.sysl.blas
 
 import sysl.buf.{Buf, buf}
 import sysl.math.complex.Complex
+import sysl.slices.as_mut_ptr
 
 // The views and the routines over them, run by `sysl test .` against the library the build linked.
 //
@@ -473,13 +474,69 @@ a_block_past_its_parent_is_refused()
 @test
 an_extent_past_32_bits_is_refused()
     var xs = [1.0]
-    val p = VectorView.of(xs[..]).unwrap().ptr
+    val p = VectorView.of(xs[..]).unwrap().ptr()
 
     assert(fails_with(VectorView.from_ptr(p, 2147483648, 1), TooLarge), "2³¹ elements")
     assert(fails_with(VectorView.from_ptr(p, 2, -2147483648), TooLarge), "|inc| = 2³¹")
     assert(VectorView.from_ptr(p, 2147483647, 1).is_ok(), "2³¹ − 1 is CBLAS's largest")
     assert(fails_with(MatrixView.from_ptr(p, 1, 2147483648, 1), TooLarge), "2³¹ columns")
     assert(fails_with(MatrixView.from_ptr(p, 1, 1, 2147483648), TooLarge), "ld 2³¹")
+
+// A view holds exactly the elements it spans, as a slice of what it was made from — so an index past
+// the view is caught by the slice, and storage a function made and answered a view over stays alive
+// as long as the view does (checked under ASan too).
+
+private fresh_matrix(rows: usize, cols: usize) -> MatrixView[real]
+    var xs: Buf[real] = buf()
+
+    for k in 0..<rows * cols do xs.push(real(k))
+
+    MatrixView.of(xs.view(), rows, cols).unwrap()
+
+@test
+a_view_keeps_the_storage_it_was_made_from_alive()
+    val m = fresh_matrix(3, 2)
+    val other = fresh_matrix(3, 2)       // a second allocation, which must not land on the first
+
+    other.set(0, 0, 99.0)
+
+    assert_eq(m.at(2, 1), 5.0, "(2, 1) of the answered matrix")
+    assert_eq(m.at(0, 0), 0.0, "the other matrix wrote its own storage")
+
+    var c = [0.0, 0.0, 0.0, 0.0]
+    gemm(Trans, NoTrans, 1.0, m, m, 0.0, MatrixView.of(c[..], 2, 2).unwrap()).unwrap()
+
+    assert_eq(c[0], 0.0 + 1.0 + 4.0, "(MᵀM)₀₀")
+    assert_eq(c[3], 9.0 + 16.0 + 25.0, "(MᵀM)₁₁")
+
+@test
+a_view_holds_exactly_the_elements_it_spans()
+    var xs = reals(20, k -> real(k))
+
+    assert_eq(MatrixView.strided(xs.view(), 2, 3, 4).unwrap().data.len, 10, "(3-1)·4 + 2")
+    assert_eq(MatrixView.of(xs.view(), 0, 3).unwrap().data.len, 0, "an empty matrix spans nothing")
+    assert_eq(VectorView.strided(xs.view(), 4, -3).unwrap().data.len, 10, "(4-1)·3 + 1")
+    assert_eq(VectorView.from_ptr(as_mut_ptr(xs.view()), 3, 2).unwrap().data.len, 5, "from a pointer too")
+    assert_eq(MatrixView.from_ptr(as_mut_ptr(xs.view()), 2, 2, 5).unwrap().data.len, 7, "(2-1)·5 + 2")
+
+    val m = MatrixView.strided(xs.view(), 3, 4, 5).unwrap()
+    val b = m.block(1, 2, 2, 2).unwrap()
+
+    assert_eq(b.data.len, 7, "the block spans (2-1)·5 + 2 of its parent")
+    assert_eq(b.at(0, 0), 11.0, "(1, 2) of the parent")
+    assert_eq(m.row(2).data.len, 16, "a row spans (4-1)·5 + 1")
+    assert_eq(m.col(3).data.len, 3, "a column spans its rows")
+    assert_eq(m.block(3, 4, 0, 0).unwrap().data.len, 0, "an empty block at the far corner")
+
+@test
+an_empty_matrix_has_empty_rows_and_columns()
+    var xs = [1.0, 2.0]
+    val wide = MatrixView.of(xs[..], 0, 2).unwrap()       // 0 × 2: every column empty
+    val tall = MatrixView.of(xs[..], 2, 0).unwrap()       // 2 × 0: every row empty
+
+    assert_eq(wide.col(1).len, 0, "a column of a 0 × 2")
+    assert_eq(tall.row(1).len, 0, "a row of a 2 × 0")
+    assert_eq(nrm2(wide.col(1)), 0.0, "BLAS takes the empty vector")
 
 @test
 the_errors_render()

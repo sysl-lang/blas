@@ -66,24 +66,30 @@ nothing. **`sh.sysl.blas`** is what a program imports:
 
 | | |
 |---|---|
-| **`MatrixView[T]`** | a column-major matrix over storage it does not own: `ptr`, `rows`, `cols`, `ld` (element `(i, j)` at `ptr + i + j·ld`). `of(xs, rows, cols)` (dense), `strided(xs, rows, cols, ld)`, `from_ptr(p, rows, cols, ld)`; `block(r, c, rows, cols)` keeps the parent's `ld`; `row(i)`, `col(j)`, `at`, `set`, `place` |
-| **`VectorView[T]`** | a strided vector: `ptr`, `len`, `inc`. `of(xs)`, `strided(xs, len, inc)`, `from_ptr(p, len, inc)`; `at`, `set`, `place`. **A negative increment follows the reference BLAS rule**: `ptr` is the lowest-addressed element and the vector runs backwards from the far end |
+| **`MatrixView[T]`** | a column-major matrix: `data`, `rows`, `cols`, `ld` (element `(i, j)` at `data[i + j·ld]`). `of(xs, rows, cols)` (dense), `strided(xs, rows, cols, ld)`, `from_ptr(p, rows, cols, ld)`; `block(r, c, rows, cols)` keeps the parent's `ld`; `row(i)`, `col(j)`, `at`, `set`, `place`, `ptr()`. **The same view `sh.sysl.lapack` takes and answers** |
+| **`VectorView[T]`** | a strided vector: `data`, `len`, `inc`. `of(xs)`, `strided(xs, len, inc)`, `from_ptr(p, len, inc)`; `at`, `set`, `place`, `ptr()`. **A negative increment follows the reference BLAS rule**: `data[0]` is the lowest-addressed element and the vector runs backwards from the far end |
 | **`Op`** | `NoTrans`, `Trans`, `ConjTrans` — how an operand enters a product |
 | `dot`, `dotc` | `Σ xᵢyᵢ` (unconjugated: nex's `x @ y`) and `Σ conj(xᵢ)yᵢ` |
 | `axpy`, `scal` | `y ← αx + y`, `x ← αx` |
 | `nrm2`, `asum` | at the element's real width (`T::Real`); `asum` of a complex vector is BLAS's `Σ |re| + |im|` |
 | `gemv`, `gemm` | `y ← α·op(A)·x + β·y`, `C ← α·op(A)·op(B) + β·C` |
 | **`BlasError`** | `ShapeMismatch`, `ZeroIncrement`, `LeadingDimension`, `OutOfStorage`, `TooLarge` |
-| `Element` | the dispatch bound: `f32`, `real`, `Complex[f32]`, `Complex[real]` |
+| `Element` | the dispatch bound: `f32`, `real`, `Complex[f32]`, `Complex[real]`; its `Real` is a `Width` (`f32` or `real`). `sh.sysl.lapack`'s `Scalar` extends it |
 
 **Every check happens before C sees the data.** A view is checked when it is made — its farthest
 element inside the slice, `ld ≥ max(1, rows)`, a non-zero increment, every extent within CBLAS's
 32-bit `int` — and a routine checks only that its operands' extents agree. So no call can reach the
 library's own parameter error (Accelerate prints it and aborts).
 
+**A view's `data` is exactly the elements it spans**, a slice of what it was made from. Made from a
+slice — an array, a `Buf`'s `view()` — it keeps that slice's backing alive for as long as it is held,
+so a function may answer a view over storage it allocated (which is how `sh.sysl.lapack` answers its
+matrices), and every element access is a checked index.
+
 **From an array that is not a sysl slice** — nex's arrays, a C library's — `from_ptr` makes a view of
 the address of the first element with its extents and stride, without a copy; only the leading
-dimension, the increment and the 32-bit range are checked there.
+dimension, the increment and the 32-bit range are checked there, and nothing is kept alive: the
+storage must outlive the view.
 
 **How nex's `@` maps onto it.** `A @ B` is `gemm(NoTrans, NoTrans, 1, A, B, 0, C)` with `C` dense
 (`ld = max(1, m)`); `transpose(A)` and `conj(transpose(A))` are `A` with `Trans` and `ConjTrans`; a
@@ -97,7 +103,7 @@ would refuse them.
 
 ## Tested
 
-`sysl test .` — 59 tests, against Accelerate and, with `--features openblas`, against OpenBLAS 0.3.34.
+`sysl test .` — 62 tests, against Accelerate and, with `--features openblas`, against OpenBLAS 0.3.34.
 The oracle is never BLAS read back against itself: hand-computed small cases on integer-valued
 operands (exact, so compared with `==`), identities computed by separate calls (`A·I = A`,
 `(AB)ᵀ = BᵀAᵀ` over every pair of transpose flags, `trsm` undoing `trmm` over all sixteen

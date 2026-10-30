@@ -71,6 +71,6 @@ No shim is needed and no sysl gap was found.
   compiled one run the same routine. The new-header ILP64 forms are not declared.
 - **A complex element dispatches through its width.** sysl's `impl` for a generic type covers every
   instantiation (`traits.md`, "An `impl` covers a generic type as a whole"), so `Complex[f32]` and
-  `Complex[real]` cannot each carry their own `impl Element`. `impl[F: ComplexWidth] Element for
-  Complex[F]` is one implementation, and `ComplexWidth` — implemented by `f32` and `real` — says which
+  `Complex[real]` cannot each carry their own `impl Element`. `impl[F: Width] Element for
+  Complex[F]` is one implementation, and `Width` — implemented by `f32` and `real` — says which
   of the `c` and `z` routines a width is. That is the language's stated design, not a gap.
